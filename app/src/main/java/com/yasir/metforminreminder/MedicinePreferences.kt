@@ -2,7 +2,9 @@ package com.yasir.metforminreminder
 
 import android.content.Context
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -16,12 +18,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
-// Keep this name unchanged to preserve existing on-device settings.
+// Keep this name unchanged to preserve existing on-device data.
 private val Context.medicineDataStore by preferencesDataStore(
     name = "medicine_preferences"
 )
 
-private val displayTimeFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
+private val displayTimeFormatter =
+    DateTimeFormatter.ofPattern("h:mm a", Locale.US)
 
 data class MedicineSchedule(
     val weekdayDose1: String = "12:00 AM",
@@ -31,6 +34,7 @@ data class MedicineSchedule(
 ) {
     fun timeFor(date: LocalDate, doseNumber: Int): LocalTime {
         require(doseNumber in 1..2)
+
         val weekend = date.dayOfWeek.value >= 6
         val text = when {
             weekend && doseNumber == 1 -> weekendDose1
@@ -38,19 +42,80 @@ data class MedicineSchedule(
             doseNumber == 1 -> weekdayDose1
             else -> weekdayDose2
         }
+
         return LocalTime.parse(text, displayTimeFormatter)
     }
 }
 
 data class TakenDose(
-    // Date of the scheduled dose, which may differ from the day it was logged.
     val date: String,
     val time: String,
-    // Zero means an old timestamp-only record with unknown dose identity.
     val doseNumber: Int = 0,
     val takenAtEpochMillis: Long? = null,
-    val scheduledTime: String? = null
+    val scheduledTime: String? = null,
+    // Only true when this record actually reduced the counter.
+    val stockDeducted: Boolean = false
 )
+
+enum class StockLevel {
+    NOT_SET,
+    NORMAL,
+    AMBER,
+    RED,
+    EMPTY
+}
+
+enum class StockAlert {
+    AMBER,
+    RED,
+    EMPTY
+}
+
+data class MedicineStock(
+    // Null means stock tracking has not been set up.
+    val remainingPills: Int? = null,
+    val amberThreshold: Int = 14,
+    val redThreshold: Int = 10,
+    val amberAlertSent: Boolean = false,
+    val redAlertSent: Boolean = false,
+    val emptyAlertSent: Boolean = false
+) {
+    val isConfigured: Boolean
+        get() = remainingPills != null
+
+    val level: StockLevel
+        get() {
+            val count = remainingPills ?: return StockLevel.NOT_SET
+            return when {
+                count == 0 -> StockLevel.EMPTY
+                count <= redThreshold -> StockLevel.RED
+                count <= amberThreshold -> StockLevel.AMBER
+                else -> StockLevel.NORMAL
+            }
+        }
+
+    // Only the most important outstanding alert is returned.
+    val pendingAlert: StockAlert?
+        get() = when (level) {
+            StockLevel.EMPTY ->
+                if (!emptyAlertSent) StockAlert.EMPTY else null
+
+            StockLevel.RED ->
+                if (!redAlertSent) StockAlert.RED else null
+
+            StockLevel.AMBER ->
+                if (!amberAlertSent) StockAlert.AMBER else null
+
+            else -> null
+        }
+}
+
+enum class UndoDoseResult {
+    UNDONE,
+    NOT_FOUND,
+    TODAY_ONLY,
+    UNDO_SECOND_DOSE_FIRST
+}
 
 class MedicinePreferences(context: Context) {
     private val store = context.applicationContext.medicineDataStore
@@ -61,28 +126,57 @@ class MedicinePreferences(context: Context) {
         val WEEKEND_DOSE_1 = stringPreferencesKey("weekend_dose_1")
         val WEEKEND_DOSE_2 = stringPreferencesKey("weekend_dose_2")
         val TAKEN_DOSES = stringSetPreferencesKey("taken_doses")
+
+        val STOCK_COUNT = intPreferencesKey("stock_count")
+        val STOCK_AMBER_THRESHOLD =
+            intPreferencesKey("stock_amber_threshold")
+        val STOCK_RED_THRESHOLD =
+            intPreferencesKey("stock_red_threshold")
+
+        val STOCK_AMBER_ALERT_SENT =
+            booleanPreferencesKey("stock_amber_alert_sent")
+        val STOCK_RED_ALERT_SENT =
+            booleanPreferencesKey("stock_red_alert_sent")
+        val STOCK_EMPTY_ALERT_SENT =
+            booleanPreferencesKey("stock_empty_alert_sent")
     }
 
-    val schedule: Flow<MedicineSchedule> = store.data.map { readSchedule(it) }
+    val schedule: Flow<MedicineSchedule> = store.data.map {
+        readSchedule(it)
+    }
 
-    val takenDoses: Flow<List<TakenDose>> = store.data.map { prefs ->
-        readDoses(prefs)
+    val takenDoses: Flow<List<TakenDose>> = store.data.map {
+        readDoses(it)
+    }
+
+    val stock: Flow<MedicineStock> = store.data.map {
+        readStock(it)
     }
 
     suspend fun getSchedule(): MedicineSchedule = schedule.first()
 
     suspend fun getTakenDoses(): List<TakenDose> = takenDoses.first()
 
-    suspend fun saveWeekdayDose1(value: String) = saveTime(Keys.WEEKDAY_DOSE_1, value)
-    suspend fun saveWeekdayDose2(value: String) = saveTime(Keys.WEEKDAY_DOSE_2, value)
-    suspend fun saveWeekendDose1(value: String) = saveTime(Keys.WEEKEND_DOSE_1, value)
-    suspend fun saveWeekendDose2(value: String) = saveTime(Keys.WEEKEND_DOSE_2, value)
+    suspend fun getStock(): MedicineStock = stock.first()
+
+    suspend fun saveWeekdayDose1(value: String) =
+        saveTime(Keys.WEEKDAY_DOSE_1, value)
+
+    suspend fun saveWeekdayDose2(value: String) =
+        saveTime(Keys.WEEKDAY_DOSE_2, value)
+
+    suspend fun saveWeekendDose1(value: String) =
+        saveTime(Keys.WEEKEND_DOSE_1, value)
+
+    suspend fun saveWeekendDose2(value: String) =
+        saveTime(Keys.WEEKEND_DOSE_2, value)
 
     suspend fun saveSchedule(value: MedicineSchedule) {
         val weekday1 = normalizeTime(value.weekdayDose1)
         val weekday2 = normalizeTime(value.weekdayDose2)
         val weekend1 = normalizeTime(value.weekendDose1)
         val weekend2 = normalizeTime(value.weekendDose2)
+
         store.edit { prefs ->
             prefs[Keys.WEEKDAY_DOSE_1] = weekday1
             prefs[Keys.WEEKDAY_DOSE_2] = weekday2
@@ -91,69 +185,284 @@ class MedicinePreferences(context: Context) {
         }
     }
 
-    // Compatibility entry point for the current Home screen and action receiver.
+    // Compatibility entry point for existing callers.
     suspend fun markDoseTaken(doseNumber: Int) {
         recordDoseTaken(doseNumber = doseNumber)
     }
 
-    // Future notification actions pass the original scheduled date explicitly.
-    // Returns false if already recorded; the first timestamp is never overwritten.
+    /**
+     * Records the dose and deducts one pill in the same edit.
+     * Duplicate records never deduct stock again.
+     * Logging remains available when stock is unset or zero.
+     */
     suspend fun recordDoseTaken(
         doseNumber: Int,
         scheduledDate: LocalDate = LocalDate.now(),
         takenAtEpochMillis: Long = System.currentTimeMillis(),
         scheduledTime: String? = null
     ): Boolean {
-        require(doseNumber in 1..2) { "Dose number must be 1 or 2" }
+        require(doseNumber in 1..2) {
+            "Dose number must be 1 or 2"
+        }
         require(takenAtEpochMillis >= 0)
+
         val dateKey = scheduledDate.toString()
         val time = Instant.ofEpochMilli(takenAtEpochMillis)
             .atZone(ZoneId.systemDefault())
             .toLocalTime()
             .format(displayTimeFormatter)
-        val explicitTime = scheduledTime?.let { normalizeTime(it) }
+
+        val explicitTime = scheduledTime?.let(::normalizeTime)
         var inserted = false
 
         store.edit { prefs ->
             val current = prefs[Keys.TAKEN_DOSES] ?: emptySet()
             val exists = current.any { raw ->
                 val dose = decodeDose(raw)
-                dose?.date == dateKey && dose.doseNumber == doseNumber
+                dose?.date == dateKey &&
+                        dose.doseNumber == doseNumber
             }
+
             if (!exists) {
                 val planned = explicitTime ?: readSchedule(prefs)
                     .timeFor(scheduledDate, doseNumber)
                     .format(displayTimeFormatter)
+
+                val count = prefs[Keys.STOCK_COUNT]
+                val deducted = count != null && count > 0
+
+                if (deducted) {
+                    prefs[Keys.STOCK_COUNT] = count!! - 1
+                }
+
                 val encoded = listOf(
                     dateKey,
                     time,
                     doseNumber.toString(),
                     takenAtEpochMillis.toString(),
-                    planned
+                    planned,
+                    deducted.toString()
                 ).joinToString("|")
+
                 prefs[Keys.TAKEN_DOSES] = current + encoded
                 inserted = true
             }
         }
+
         return inserted
     }
 
-    suspend fun isDoseTaken(date: LocalDate, doseNumber: Int): Boolean {
+    suspend fun isDoseTaken(
+        date: LocalDate,
+        doseNumber: Int
+    ): Boolean {
         require(doseNumber in 1..2)
+
         return getTakenDoses().any {
-            it.date == date.toString() && it.doseNumber == doseNumber
+            it.date == date.toString() &&
+                    it.doseNumber == doseNumber
         }
     }
 
-    private suspend fun saveTime(key: Preferences.Key<String>, value: String) {
+    /**
+     * Corrects an accidental Taken tap for today's scheduled doses.
+     * Dose 2 must be undone before Dose 1.
+     *
+     * Restores a pill only if this record actually deducted one.
+     * Reminder rescheduling is handled by the caller.
+     */
+    suspend fun undoDoseTaken(
+        doseNumber: Int,
+        scheduledDate: LocalDate = LocalDate.now()
+    ): UndoDoseResult {
+        require(doseNumber in 1..2)
+
+        var result = UndoDoseResult.NOT_FOUND
+
+        store.edit { prefs ->
+            if (scheduledDate != LocalDate.now()) {
+                result = UndoDoseResult.TODAY_ONLY
+                return@edit
+            }
+
+            val dateKey = scheduledDate.toString()
+            val current = prefs[Keys.TAKEN_DOSES] ?: emptySet()
+
+            val matching = current.filter { raw ->
+                val dose = decodeDose(raw)
+                dose?.date == dateKey &&
+                        dose.doseNumber == doseNumber
+            }
+
+            if (matching.isEmpty()) {
+                return@edit
+            }
+
+            val secondDoseTaken = current.any { raw ->
+                val dose = decodeDose(raw)
+                dose?.date == dateKey && dose.doseNumber == 2
+            }
+
+            if (doseNumber == 1 && secondDoseTaken) {
+                result = UndoDoseResult.UNDO_SECOND_DOSE_FIRST
+                return@edit
+            }
+
+            val restorePill = matching.any { raw ->
+                decodeDose(raw)?.stockDeducted == true
+            }
+
+            val count = prefs[Keys.STOCK_COUNT]
+            if (restorePill && count != null) {
+                check(count < Int.MAX_VALUE) {
+                    "Stock count is too large to restore a pill"
+                }
+                prefs[Keys.STOCK_COUNT] = count + 1
+            }
+
+            prefs[Keys.TAKEN_DOSES] =
+                current - matching.toSet()
+
+            // Do not re-arm alerts merely because of Undo.
+            // This prevents repeated Take/Undo taps causing alert spam.
+            result = UndoDoseResult.UNDONE
+        }
+
+        return result
+    }
+
+    /**
+     * Sets the exact current count, for initial setup or correction.
+     * This is not an amount to add.
+     */
+    suspend fun setStockCount(count: Int) {
+        require(count >= 0) {
+            "Stock cannot be negative"
+        }
+
+        store.edit { prefs ->
+            prefs[Keys.STOCK_COUNT] = count
+            resetRecoveredAlerts(prefs)
+        }
+    }
+
+    /**
+     * Adds newly supplied pills to an already configured counter.
+     */
+    suspend fun addStock(amount: Int) {
+        require(amount > 0) {
+            "Enter at least one pill"
+        }
+
+        store.edit { prefs ->
+            val count = prefs[Keys.STOCK_COUNT]
+            requireNotNull(count) {
+                "Set your current stock before adding a resupply"
+            }
+
+            require(count <= Int.MAX_VALUE - amount) {
+                "Stock count is too large"
+            }
+
+            prefs[Keys.STOCK_COUNT] = count + amount
+            resetRecoveredAlerts(prefs)
+        }
+    }
+
+    suspend fun saveStockThresholds(
+        amberThreshold: Int,
+        redThreshold: Int
+    ) {
+        require(redThreshold >= 1) {
+            "The red threshold must be at least 1"
+        }
+        require(amberThreshold > redThreshold) {
+            "The amber threshold must be higher than red"
+        }
+
+        store.edit { prefs ->
+            val previous = readStock(prefs)
+            val changed =
+                previous.amberThreshold != amberThreshold ||
+                        previous.redThreshold != redThreshold
+
+            prefs[Keys.STOCK_AMBER_THRESHOLD] = amberThreshold
+            prefs[Keys.STOCK_RED_THRESHOLD] = redThreshold
+
+            if (changed) {
+                prefs[Keys.STOCK_AMBER_ALERT_SENT] = false
+                prefs[Keys.STOCK_RED_ALERT_SENT] = false
+                prefs[Keys.STOCK_EMPTY_ALERT_SENT] = false
+            }
+        }
+    }
+
+    /**
+     * Call only after a restock notification was successfully posted.
+     * A more severe alert also covers less severe levels.
+     */
+    suspend fun markStockAlertSent(alert: StockAlert) {
+        store.edit { prefs ->
+            val current = readStock(prefs)
+
+            // Ignore a stale notification result after stock changes.
+            if (current.pendingAlert == alert) {
+                when (alert) {
+                    StockAlert.AMBER -> {
+                        prefs[Keys.STOCK_AMBER_ALERT_SENT] = true
+                    }
+
+                    StockAlert.RED -> {
+                        prefs[Keys.STOCK_AMBER_ALERT_SENT] = true
+                        prefs[Keys.STOCK_RED_ALERT_SENT] = true
+                    }
+
+                    StockAlert.EMPTY -> {
+                        prefs[Keys.STOCK_AMBER_ALERT_SENT] = true
+                        prefs[Keys.STOCK_RED_ALERT_SENT] = true
+                        prefs[Keys.STOCK_EMPTY_ALERT_SENT] = true
+                    }
+                }
+            }
+        }
+    }
+
+    private fun resetRecoveredAlerts(
+        prefs: androidx.datastore.preferences.core.MutablePreferences
+    ) {
+        val current = readStock(prefs)
+        val count = current.remainingPills ?: return
+
+        if (count > current.amberThreshold) {
+            prefs[Keys.STOCK_AMBER_ALERT_SENT] = false
+        }
+        if (count > current.redThreshold) {
+            prefs[Keys.STOCK_RED_ALERT_SENT] = false
+        }
+        if (count > 0) {
+            prefs[Keys.STOCK_EMPTY_ALERT_SENT] = false
+        }
+    }
+
+    private suspend fun saveTime(
+        key: Preferences.Key<String>,
+        value: String
+    ) {
         val normalized = normalizeTime(value)
         store.edit { it[key] = normalized }
     }
 
-    private fun readSchedule(prefs: Preferences): MedicineSchedule {
-        fun read(key: Preferences.Key<String>, fallback: String): String =
-            prefs[key]?.let { runCatching { normalizeTime(it) }.getOrNull() }
-                ?: fallback
+    private fun readSchedule(
+        prefs: Preferences
+    ): MedicineSchedule {
+        fun read(
+            key: Preferences.Key<String>,
+            fallback: String
+        ): String =
+            prefs[key]?.let {
+                runCatching { normalizeTime(it) }.getOrNull()
+            } ?: fallback
+
         return MedicineSchedule(
             weekdayDose1 = read(Keys.WEEKDAY_DOSE_1, "12:00 AM"),
             weekdayDose2 = read(Keys.WEEKDAY_DOSE_2, "12:00 PM"),
@@ -162,29 +471,87 @@ class MedicinePreferences(context: Context) {
         )
     }
 
-    private fun readDoses(prefs: Preferences): List<TakenDose> =
+    private fun readStock(prefs: Preferences): MedicineStock {
+        val red = (prefs[Keys.STOCK_RED_THRESHOLD] ?: 10)
+            .coerceIn(1, Int.MAX_VALUE - 1)
+
+        val amber = (prefs[Keys.STOCK_AMBER_THRESHOLD] ?: 14)
+            .coerceAtLeast(red + 1)
+
+        return MedicineStock(
+            remainingPills = prefs[Keys.STOCK_COUNT]
+                ?.coerceAtLeast(0),
+            amberThreshold = amber,
+            redThreshold = red,
+            amberAlertSent =
+                prefs[Keys.STOCK_AMBER_ALERT_SENT] ?: false,
+            redAlertSent =
+                prefs[Keys.STOCK_RED_ALERT_SENT] ?: false,
+            emptyAlertSent =
+                prefs[Keys.STOCK_EMPTY_ALERT_SENT] ?: false
+        )
+    }
+
+    private fun readDoses(
+        prefs: Preferences
+    ): List<TakenDose> =
         (prefs[Keys.TAKEN_DOSES] ?: emptySet())
-            .mapNotNull { decodeDose(it) }
+            .mapNotNull(::decodeDose)
             .sortedWith(
                 compareByDescending<TakenDose> { it.date }
                     .thenBy { it.doseNumber }
                     .thenBy { it.takenAtEpochMillis ?: 0L }
             )
 
-    // Reads both legacy formats and the extended format, without deleting any data.
-    private fun decodeDose(raw: String): TakenDose? = runCatching {
-        val parts = raw.split('|')
-        require(parts.size == 2 || parts.size == 3 || parts.size == 5)
-        val date = LocalDate.parse(parts[0]).toString()
-        val time = normalizeTime(parts[1])
-        val number = if (parts.size == 2) 0 else parts[2].toInt()
-        require(number in 0..2)
-        val epoch = if (parts.size == 5) parts[3].toLong() else null
-        val planned = if (parts.size == 5) normalizeTime(parts[4]) else null
-        TakenDose(date, time, number, epoch, planned)
-    }.getOrNull()
+    // Supports the original 2-, 3- and 5-field records,
+    // plus the new 6-field records with stock deduction metadata.
+    private fun decodeDose(raw: String): TakenDose? =
+        runCatching {
+            val parts = raw.split('|')
+            require(parts.size in setOf(2, 3, 5, 6))
+
+            val date = LocalDate.parse(parts[0]).toString()
+            val time = normalizeTime(parts[1])
+            val number =
+                if (parts.size == 2) 0 else parts[2].toInt()
+
+            require(number in 0..2)
+
+            val epoch = if (parts.size >= 5) {
+                parts[3].toLong().also { require(it >= 0) }
+            } else {
+                null
+            }
+
+            val planned = if (parts.size >= 5) {
+                normalizeTime(parts[4])
+            } else {
+                null
+            }
+
+            val deducted = if (parts.size == 6) {
+                when (parts[5]) {
+                    "true" -> true
+                    "false" -> false
+                    else -> error("Invalid stock deduction flag")
+                }
+            } else {
+                false
+            }
+
+            TakenDose(
+                date = date,
+                time = time,
+                doseNumber = number,
+                takenAtEpochMillis = epoch,
+                scheduledTime = planned,
+                stockDeducted = deducted
+            )
+        }.getOrNull()
 
     private fun normalizeTime(value: String): String =
-        LocalTime.parse(value.trim().uppercase(Locale.US), displayTimeFormatter)
-            .format(displayTimeFormatter)
+        LocalTime.parse(
+            value.trim().uppercase(Locale.US),
+            displayTimeFormatter
+        ).format(displayTimeFormatter)
 }

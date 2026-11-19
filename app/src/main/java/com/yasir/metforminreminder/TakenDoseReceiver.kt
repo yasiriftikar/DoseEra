@@ -1,15 +1,18 @@
 package com.yasir.metforminreminder
 
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import java.time.LocalDate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-/** Persists a notification's original scheduled dose, then refreshes reminders. */
+/** Saves notification Taken actions, including the stock deduction. */
 class TakenDoseReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ReminderReceiver.ACTION_MARK_TAKEN) return
@@ -32,8 +35,8 @@ class TakenDoseReceiver : BroadcastReceiver() {
         }
 
         val rawDate = intent.getStringExtra(AlarmScheduler.EXTRA_SCHEDULED_DATE)
-        // Legacy actions did not include a scheduled date. New actions always do.
         val scheduledDate = if (rawDate == null) {
+            // Retain compatibility with notifications created by older versions.
             LocalDate.now()
         } else {
             runCatching { LocalDate.parse(rawDate) }.getOrNull() ?: run {
@@ -54,25 +57,44 @@ class TakenDoseReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val preferences = MedicinePreferences(appContext)
-                preferences.recordDoseTaken(
-                    doseNumber = doseNumber,
-                    scheduledDate = scheduledDate,
-                    takenAtEpochMillis = tappedAt,
-                    scheduledTime = scheduledTime
-                )
-
-                // Stable notification IDs are reused daily. Do not dismiss a newer
-                // notification if the user activates an old action after midnight.
-                dismissMatchingNotification(appContext, doseNumber, scheduledDate)
-
-                // The fresh snapshot skips the recorded date/dose and uses the
-                // appropriate weekday or weekend schedule for the next occurrence.
-                if (!AlarmScheduler.refresh(appContext)) {
-                    Log.w(TAG, "Dose saved, but exact alarm access is unavailable")
+                try {
+                    // The preferences transaction handles duplicate actions and
+                    // deducts one pill only when it inserts a new dose record.
+                    preferences.recordDoseTaken(
+                        doseNumber = doseNumber,
+                        scheduledDate = scheduledDate,
+                        takenAtEpochMillis = tappedAt,
+                        scheduledTime = scheduledTime
+                    )
+                } catch (error: Exception) {
+                    // Leave the notification visible if saving fails.
+                    Log.e(TAG, "Unable to save Taken action", error)
+                    return@launch
                 }
-            } catch (error: Exception) {
-                // Keep the reminder visible if persistence fails; do not imply success.
-                Log.e(TAG, "Unable to complete Taken action", error)
+
+                // These follow-up operations are independent: failure of one
+                // must not prevent the others after the dose was saved.
+                try {
+                    dismissMatchingNotification(appContext, doseNumber, scheduledDate)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Dose saved, but notification dismissal failed", error)
+                }
+
+                try {
+                    if (!AlarmScheduler.refresh(appContext)) {
+                        Log.w(TAG, "Dose saved, but exact alarm access is unavailable")
+                    }
+                } catch (error: Exception) {
+                    Log.e(TAG, "Dose saved, but reminder refresh failed", error)
+                }
+
+                try {
+                    NotificationHelper.syncStockReminder(appContext, preferences)
+                } catch (error: Exception) {
+                    // Keep the saved dose. A pending stock alert can be retried
+                    // when Home opens or another stock-changing action occurs.
+                    Log.e(TAG, "Dose saved, but stock notification update failed", error)
+                }
             } finally {
                 pendingResult.finish()
             }
@@ -84,35 +106,44 @@ class TakenDoseReceiver : BroadcastReceiver() {
         doseNumber: Int,
         scheduledDate: LocalDate
     ) {
-        val manager = context.getSystemService(android.app.NotificationManager::class.java)
-        val expectedUri = android.net.Uri.parse(
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val id = AlarmScheduler.notificationIdFor(doseNumber)
+        val expectedUri = Uri.parse(
             "metformin-reminder://taken/$scheduledDate/$doseNumber"
         )
-        val id = AlarmScheduler.notificationIdFor(doseNumber)
-
-        // Notification extras carry the original date in newer receiver versions.
-        // For the current receiver, the immutable action token identifies that date.
-        val expectedAction = android.app.PendingIntent.getBroadcast(
+        val expectedAction = PendingIntent.getBroadcast(
             context,
             id,
             Intent(context, TakenDoseReceiver::class.java).apply {
                 action = ReminderReceiver.ACTION_MARK_TAKEN
                 data = expectedUri
             },
-            android.app.PendingIntent.FLAG_NO_CREATE or
-                android.app.PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
         )
-        manager.activeNotifications.filter { it.id == id && it.tag == null }
+
+        manager.activeNotifications
+            .filter { it.id == id && it.tag == null }
             .forEach { active ->
+                val actions = active.notification.actions
                 val matchesAction = expectedAction != null &&
-                    active.notification.actions?.any {
-                        it.actionIntent == expectedAction
-                    } == true
-                val legacyToday = scheduledDate == LocalDate.now() &&
-                    active.notification.actions?.any {
-                        it.actionIntent == expectedAction
-                    } != true
-                if (matchesAction || legacyToday) {
+                    actions?.any { it.actionIntent == expectedAction } == true
+
+                // Only use the legacy fallback for today's record and an
+                // action token with no date URI. Never dismiss a newer dated
+                // notification merely because its stable ID was reused.
+                val legacyAction = PendingIntent.getBroadcast(
+                    context,
+                    id,
+                    Intent(context, TakenDoseReceiver::class.java).apply {
+                        action = ReminderReceiver.ACTION_MARK_TAKEN
+                    },
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                )
+                val matchesLegacyToday = scheduledDate == LocalDate.now() &&
+                    legacyAction != null &&
+                    actions?.any { it.actionIntent == legacyAction } == true
+
+                if (matchesAction || matchesLegacyToday) {
                     manager.cancel(id)
                 }
             }

@@ -12,6 +12,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -42,8 +46,14 @@ import kotlinx.coroutines.launch
 
 private val Navy = Color(0xFF101A2B)
 private val MutedText = Color(0xFF718096)
-private val Emerald = Color(0xFF05855F)
-private val SoftGreen = Color(0xFFEAF9F4)
+private data class DosePalette(val accent: Color, val soft: Color)
+private val LocalDosePalette = staticCompositionLocalOf {
+    DosePalette(Color(0xFF05855F), Color(0xFFEAF9F4))
+}
+private val Emerald: Color
+    @Composable get() = LocalDosePalette.current.accent
+private val SoftGreen: Color
+    @Composable get() = LocalDosePalette.current.soft
 private val SoftGray = Color(0xFFF4F7FB)
 private val TimeFormat = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
 
@@ -70,14 +80,16 @@ private fun MetforminReminderApp(resumeVersion: Int) {
     val snackbar = remember { SnackbarHostState() }
     val schedule by preferences.schedule.collectAsState(initial = null)
     val records by preferences.takenDoses.collectAsState(initial = null)
+    val stock by preferences.stock.collectAsState(initial = null)
     var selectedTab by remember { mutableStateOf("Home") }
     var showSettings by remember { mutableStateOf(false) }
+    var stockDialog by remember { mutableStateOf(false) }
+    var undoNumber by remember { mutableStateOf<Int?>(null) }
     var busy by remember { mutableStateOf(false) }
     var today by remember { mutableStateOf(LocalDate.now()) }
     var notificationsEnabled by remember { mutableStateOf(false) }
     var exactEnabled by remember { mutableStateOf(false) }
     var permissionRevision by remember { mutableStateOf(0) }
-
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { permissionRevision++ }
@@ -85,27 +97,37 @@ private fun MetforminReminderApp(resumeVersion: Int) {
         ActivityResultContracts.StartActivityForResult()
     ) { permissionRevision++ }
 
-    fun requestExactPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    fun message(text: String) { scope.launch { snackbar.showSnackbar(text) } }
+
+    suspend fun refreshAfterChange() {
+        try { AlarmScheduler.refresh(context) }
+        catch (_: Exception) { message("Saved. Reminder scheduling needs attention in Settings.") }
+        try { NotificationHelper.syncStockReminder(context, preferences) }
+        catch (_: Exception) { message("Saved. Supply alert could not be updated.") }
+    }
+
+    fun undo(number: Int, date: LocalDate) {
+        if (busy) return
+        busy = true
+        scope.launch {
             try {
-                exactPermission.launch(
-                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                        Uri.parse("package:${context.packageName}"))
-                )
+                val result = preferences.undoDoseTaken(number, date)
+                if (result == UndoDoseResult.UNDONE) refreshAfterChange()
+                message(when (result) {
+                    UndoDoseResult.UNDONE -> "Taken record undone. Stock corrected if a pill was deducted."
+                    UndoDoseResult.NOT_FOUND -> "That record was already removed."
+                    UndoDoseResult.TODAY_ONLY -> "Only today's doses can be undone."
+                    UndoDoseResult.UNDO_SECOND_DOSE_FIRST -> "Undo the second dose first."
+                })
             } catch (_: Exception) {
-                scope.launch { snackbar.showSnackbar("Open app Settings to allow alarms and reminders.") }
-            }
+                message("Could not undo. Check Home and stock before retrying.")
+            } finally { busy = false }
         }
     }
 
     LaunchedEffect(Unit) {
-        NotificationHelper.createChannels(context)
-        while (isActive) {
-            today = LocalDate.now()
-            delay(15_000)
-        }
+        while (isActive) { today = LocalDate.now(); delay(15_000) }
     }
-
     LaunchedEffect(schedule, records, resumeVersion, permissionRevision, today) {
         NotificationHelper.createChannels(context)
         today = LocalDate.now()
@@ -114,77 +136,93 @@ private fun MetforminReminderApp(resumeVersion: Int) {
         val loadedSchedule = schedule
         val loadedRecords = records
         if (loadedSchedule != null && loadedRecords != null) {
-            try {
-                exactEnabled = AlarmScheduler.scheduleAll(context, loadedSchedule, loadedRecords)
-            } catch (_: Exception) {
-                snackbar.showSnackbar("Unable to schedule reminders. Check Settings.")
-            }
+            try { exactEnabled = AlarmScheduler.scheduleAll(context, loadedSchedule, loadedRecords) }
+            catch (_: Exception) { message("Unable to schedule reminders. Check Settings.") }
         }
     }
-
-    MaterialTheme(colorScheme = lightColorScheme(primary = Emerald, background = Color.White)) {
-        Scaffold(
-            containerColor = Color.White,
-            snackbarHost = { SnackbarHost(snackbar) },
-            bottomBar = {
-                if (!showSettings) {
-                    NavigationBar(containerColor = Color.White) {
+    LaunchedEffect(stock, resumeVersion, permissionRevision) {
+        if (stock != null) {
+            try { NotificationHelper.syncStockReminder(context, preferences) }
+            catch (_: Exception) { message("Supply alert could not be updated.") }
+        }
+    }
+    val palette = when (stock?.level) {
+        StockLevel.AMBER -> DosePalette(Color(0xFF996400), Color(0xFFFFF3D6))
+        StockLevel.RED, StockLevel.EMPTY -> DosePalette(Color(0xFFBA2727), Color(0xFFFFEAEA))
+        else -> DosePalette(Color(0xFF05855F), Color(0xFFEAF9F4))
+    }
+    CompositionLocalProvider(LocalDosePalette provides palette) {
+        MaterialTheme(colorScheme = lightColorScheme(primary = Emerald, background = Color.White)) {
+            Scaffold(
+                containerColor = Color.White,
+                snackbarHost = { SnackbarHost(snackbar) },
+                bottomBar = {
+                    if (!showSettings) NavigationBar(containerColor = Color.White) {
                         listOf("Home", "History", "Stats").forEach { tab ->
                             NavigationBarItem(
                                 selected = selectedTab == tab,
                                 onClick = { selectedTab = tab },
-                                icon = {
-                                    Icon(
-                                        when (tab) {
-                                            "Home" -> Icons.Default.Home
-                                            "History" -> Icons.Default.CalendarMonth
-                                            else -> Icons.Default.BarChart
-                                        }, tab
-                                    )
-                                },
+                                icon = { Icon(when (tab) {
+                                    "Home" -> Icons.Default.Home
+                                    "History" -> Icons.Default.CalendarMonth
+                                    else -> Icons.Default.BarChart
+                                }, tab) },
                                 label = { Text(tab) },
                                 colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = Emerald,
-                                    selectedTextColor = Emerald,
+                                    selectedIconColor = Emerald, selectedTextColor = Emerald,
                                     indicatorColor = SoftGreen,
-                                    unselectedIconColor = MutedText,
-                                    unselectedTextColor = MutedText
+                                    unselectedIconColor = MutedText, unselectedTextColor = MutedText
                                 )
                             )
                         }
                     }
                 }
-            }
-        ) { padding ->
-            val currentSchedule = schedule
-            val currentRecords = records
-            if (currentSchedule == null || currentRecords == null) {
-                Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Emerald)
-                }
-            } else if (showSettings) {
-                SettingsScreen(
-                    modifier = Modifier.padding(padding),
-                    schedule = currentSchedule,
-                    notificationsEnabled = notificationsEnabled,
-                    exactEnabled = exactEnabled,
-                    onBack = { showSettings = false },
-                    onNotifications = {
-                        if (!NotificationHelper.hasNotificationPermission(context) &&
-                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                        ) {
-                            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            try {
-                                context.startActivity(NotificationHelper.doseChannelSettingsIntent(context))
-                            } catch (_: Exception) {
-                                context.startActivity(NotificationHelper.notificationSettingsIntent(context))
+            ) { padding ->
+                val cs = schedule
+                val cr = records
+                val st = stock
+                if (cs == null || cr == null || st == null) {
+                    Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                } else if (showSettings) {
+                    SettingsScreen(
+                        modifier = Modifier.padding(padding), schedule = cs,
+                        notificationsEnabled = notificationsEnabled, exactEnabled = exactEnabled,
+                        stock = st,
+                        restockEnabled = run {
+                            resumeVersion
+                            permissionRevision
+                            NotificationHelper.isRestockChannelEnabled(context)
+                        },
+                        onStock = { stockDialog = true },
+                        onRestockNotifications = {
+                            if (!NotificationHelper.hasNotificationPermission(context) &&
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                try { context.startActivity(NotificationHelper.restockChannelSettingsIntent(context)) }
+                                catch (_: Exception) { message("Open Android notification settings for DoseEra.") }
                             }
-                        }
-                    },
-                    onExactAlarms = { requestExactPermission() },
-                    onSave = { number, weekend, time ->
-                        scope.launch {
+                        },
+                        onBack = { showSettings = false },
+                        onNotifications = {
+                            if (!NotificationHelper.hasNotificationPermission(context) &&
+                                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else {
+                                try { context.startActivity(NotificationHelper.doseChannelSettingsIntent(context)) }
+                                catch (_: Exception) { message("Open Android notification settings for DoseEra.") }
+                            }
+                        },
+                        onExactAlarms = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                try { exactPermission.launch(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                                    Uri.parse("package:${context.packageName}"))) }
+                                catch (_: Exception) { message("Open Android settings to allow alarms.") }
+                            }
+                        },
+                        onSave = { number, weekend, time -> scope.launch {
                             try {
                                 when {
                                     weekend && number == 1 -> preferences.saveWeekendDose1(time)
@@ -192,58 +230,80 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                                     number == 1 -> preferences.saveWeekdayDose1(time)
                                     else -> preferences.saveWeekdayDose2(time)
                                 }
-                                snackbar.showSnackbar("Schedule saved")
-                            } catch (_: Exception) {
-                                snackbar.showSnackbar("Could not save schedule")
-                            }
-                        }
-                    }
-                )
-            } else {
-                when (selectedTab) {
-                    "History" -> HistoryScreen(Modifier.padding(padding), currentSchedule, currentRecords, today)
-                    "Stats" -> StatsScreen(Modifier.padding(padding), currentRecords, today)
+                                message("Schedule saved")
+                            } catch (_: Exception) { message("Could not save schedule") }
+                        } }
+                    )
+                } else when (selectedTab) {
+                    "History" -> HistoryScreen(Modifier.padding(padding), cs, cr, today)
+                    "Stats" -> StatsScreen(Modifier.padding(padding), cr, today)
                     else -> HomeScreen(
-                        modifier = Modifier.padding(padding),
-                        schedule = currentSchedule,
-                        records = currentRecords,
-                        today = today,
-                        busy = busy,
-                        remindersReady = notificationsEnabled && exactEnabled,
-                        onSettings = { showSettings = true },
+                        modifier = Modifier.padding(padding), schedule = cs, records = cr,
+                        today = today, busy = busy, remindersReady = notificationsEnabled && exactEnabled,
+                        stock = st, onStock = { stockDialog = true },
+                        onUndo = { undoNumber = it }, onSettings = { showSettings = true },
                         onTake = { number ->
                             if (!busy) {
                                 busy = true
-                                // Capture the visible scheduled day before asynchronous work.
                                 val date = today
-                                val plannedTime = currentSchedule.timeFor(date, number).format(TimeFormat)
                                 scope.launch {
+                                    var inserted = false
                                     try {
-                                        val inserted = preferences.recordDoseTaken(
-                                            doseNumber = number,
-                                            scheduledDate = date,
-                                            scheduledTime = plannedTime
-                                        )
-                                        AlarmScheduler.dismissNotification(context, number)
-                                        val armed = AlarmScheduler.refresh(context)
-                                        snackbar.showSnackbar(
-                                            when {
-                                                !inserted -> "This dose was already recorded"
-                                                !armed -> "Dose saved. Enable alarms in Settings for reminders."
-                                                else -> "Dose $number recorded as taken"
-                                            }
-                                        )
+                                        inserted = preferences.recordDoseTaken(number, date,
+                                            scheduledTime = cs.timeFor(date, number).format(TimeFormat))
                                     } catch (_: Exception) {
-                                        snackbar.showSnackbar("Could not complete the action. Check History before retrying.")
-                                    } finally {
+                                        message("Could not save. Check History and stock before retrying.")
                                         busy = false
+                                        return@launch
                                     }
+                                    try { AlarmScheduler.dismissNotification(context, number) }
+                                    catch (_: Exception) { message("Saved, but notification dismissal failed.") }
+                                    refreshAfterChange()
+                                    busy = false
+                                    if (inserted) {
+                                        val result = snackbar.showSnackbar(
+                                            "Dose $number recorded", actionLabel = "Undo",
+                                            withDismissAction = true, duration = SnackbarDuration.Long)
+                                        if (result == SnackbarResult.ActionPerformed) undo(number, date)
+                                    } else message("This dose was already recorded")
                                 }
                             }
                         }
                     )
                 }
             }
+            if (stockDialog && stock != null) StockEditor(
+                stock = stock!!, busy = busy,
+                onDismiss = { if (!busy) stockDialog = false },
+                onSave = { count, add, amber, red ->
+                    if (!busy) {
+                        busy = true
+                        scope.launch {
+                            try {
+                                // Apply count first so threshold changes use the new count.
+                                if (count != null) {
+                                    if (add) preferences.addStock(count) else preferences.setStockCount(count)
+                                }
+                                preferences.saveStockThresholds(amber, red)
+                                stockDialog = false
+                                message("Stock settings saved")
+                            } catch (error: Exception) {
+                                message(error.message ?: "Could not save. Check stock before retrying.")
+                            } finally { busy = false }
+                        }
+                    }
+                }
+            )
+            val number = undoNumber
+            if (number != null) AlertDialog(
+                onDismissRequest = { undoNumber = null },
+                title = { Text("Undo dose $number?") },
+                text = { Text("Use this only to correct an accidental Taken tap, not to record another dose. A deducted pill will be returned to the counter.") },
+                confirmButton = { TextButton(onClick = {
+                    undoNumber = null; undo(number, today)
+                }, enabled = !busy) { Text("Undo Taken") } },
+                dismissButton = { TextButton(onClick = { undoNumber = null }) { Text("Cancel") } }
+            )
         }
     }
 }
@@ -257,6 +317,9 @@ private fun HomeScreen(
     busy: Boolean,
     remindersReady: Boolean,
     onSettings: () -> Unit,
+    stock: MedicineStock,
+    onStock: () -> Unit,
+    onUndo: (Int) -> Unit,
     onTake: (Int) -> Unit
 ) {
     val todayRecords = records.filter { it.date == today.toString() && it.doseNumber in 1..2 }
@@ -282,6 +345,9 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(18.dp))
         }
+        item(key = "stock") {
+            StockBar(stock, todayRecords, today, onStock)
+        }
         if (!remindersReady) {
             item {
                 Card(onClick = onSettings, colors = CardDefaults.cardColors(containerColor = SoftGray)) {
@@ -289,19 +355,23 @@ private fun HomeScreen(
                 }
             }
         }
-        items(listOf(1, 2)) { number ->
-            val taken = todayRecords.firstOrNull { it.doseNumber == number }
-            val available = number == 1 || todayRecords.any { it.doseNumber == 1 }
-            DoseCard(
-                title = if (number == 1) "First Dose" else "Second Dose",
-                time = schedule.timeFor(today, number).format(TimeFormat),
-                primary = number == 1,
-                taken = taken,
-                available = available,
-                busy = busy,
-                remindersReady = remindersReady,
-                onTake = { onTake(number) }
-            )
+        for (number in 1..2) {
+            item(key = "dose-$number") {
+                val taken = todayRecords.firstOrNull { it.doseNumber == number }
+                val available = number == 1 || todayRecords.any { it.doseNumber == 1 }
+                DoseCard(
+                    title = if (number == 1) "First Dose" else "Second Dose",
+                    time = schedule.timeFor(today, number).format(TimeFormat),
+                    primary = number == 1,
+                    taken = taken,
+                    available = available,
+                    busy = busy,
+                    remindersReady = remindersReady,
+                    onUndo = { onUndo(number) },
+                    canUndo = number == 2 || todayRecords.none { it.doseNumber == 2 },
+                    onTake = { onTake(number) }
+                )
+            }
         }
         item {
             Text("Today · ${todayRecords.map { it.doseNumber }.distinct().size}/2 recorded",
@@ -322,6 +392,8 @@ private fun DoseCard(
     available: Boolean,
     busy: Boolean,
     remindersReady: Boolean,
+    onUndo: () -> Unit,
+    canUndo: Boolean,
     onTake: () -> Unit
 ) {
     Card(
@@ -371,6 +443,10 @@ private fun DoseCard(
             Spacer(Modifier.height(18.dp))
             Text(if (taken != null) "Taken at ${taken.time}" else "Scheduled dose",
                 color = if (taken != null) Emerald else MutedText, fontSize = 14.sp)
+            if (taken != null) {
+                TextButton(onClick = onUndo, enabled = canUndo && !busy) { Text("Undo Taken") }
+                if (!canUndo) Text("Undo the second dose first", color = MutedText, fontSize = 12.sp)
+            }
         }
     }
 }
@@ -383,7 +459,7 @@ private fun HistoryScreen(
     today: LocalDate
 ) {
     val dates = (records.mapNotNull { runCatching { LocalDate.parse(it.date) }.getOrNull() }
-        + (0L..6L).map { today.minusDays(it) }).distinct().sortedDescending()
+            + (0L..6L).map { today.minusDays(it) }).distinct().sortedDescending()
     LazyColumn(
         modifier.fillMaxSize(), contentPadding = PaddingValues(24.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
@@ -460,53 +536,248 @@ private fun SettingsScreen(
     schedule: MedicineSchedule,
     notificationsEnabled: Boolean,
     exactEnabled: Boolean,
+    stock: MedicineStock,
+    restockEnabled: Boolean,
+    onStock: () -> Unit,
+    onRestockNotifications: () -> Unit,
     onBack: () -> Unit,
     onNotifications: () -> Unit,
     onExactAlarms: () -> Unit,
     onSave: (Int, Boolean, String) -> Unit
 ) {
     val context = LocalContext.current
+    androidx.activity.compose.BackHandler(onBack = onBack)
     fun pickTime(number: Int, weekend: Boolean, value: String) {
         val time = runCatching { LocalTime.parse(value, TimeFormat) }.getOrDefault(LocalTime.NOON)
         TimePickerDialog(context, { _, hour, minute ->
             onSave(number, weekend, LocalTime.of(hour, minute).format(TimeFormat))
         }, time.hour, time.minute, false).show()
     }
-    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(22.dp)
+    ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Navy) }
-                Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Navy)
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Navy)
+                }
+                Spacer(Modifier.width(6.dp))
+                Column {
+                    Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Navy)
+                    Text("Manage your supply and reminders", color = MutedText, fontSize = 14.sp)
+                }
             }
         }
         item {
-            Text("Reminder access", color = Navy, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-            SettingsRow("Dose notifications", if (notificationsEnabled) "Enabled" else "Review", onNotifications)
-            SettingsRow("Exact alarms", if (exactEnabled) "Allowed" else "Allow", onExactAlarms)
+            SettingsSection("Stock management", Icons.Default.Medication) {
+                SettingsRow("Current stock", stock.remainingPills?.let { "$it pills" } ?: "Set up", onStock)
+                SectionDivider()
+                SettingsRow("Low-stock thresholds", "${stock.amberThreshold} / ${stock.redThreshold}", onStock)
+                Text("Amber at ${stock.amberThreshold} pills · Red at ${stock.redThreshold} pills",
+                    color = MutedText, fontSize = 12.sp, modifier = Modifier.padding(bottom = 12.dp))
+                Text("Tap a row to update your count, add a resupply or change thresholds.",
+                    color = MutedText, fontSize = 13.sp, modifier = Modifier.padding(bottom = 6.dp))
+            }
         }
         item {
-            Text("Weekday schedule", color = Navy, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-            SettingsRow("Dose 1", schedule.weekdayDose1) { pickTime(1, false, schedule.weekdayDose1) }
-            SettingsRow("Dose 2", schedule.weekdayDose2) { pickTime(2, false, schedule.weekdayDose2) }
+            SettingsSection("Reminder access", Icons.Default.NotificationsNone) {
+                SettingsRow("Dose notifications", if (notificationsEnabled) "Enabled" else "Review", onNotifications)
+                SectionDivider()
+                SettingsRow("Restock notifications", if (restockEnabled) "Enabled" else "Review", onRestockNotifications)
+                SectionDivider()
+                SettingsRow("Exact alarms", if (exactEnabled) "Allowed" else "Allow", onExactAlarms)
+            }
         }
         item {
-            Text("Weekend schedule", color = Navy, fontSize = 21.sp, fontWeight = FontWeight.Bold)
-            SettingsRow("Dose 1", schedule.weekendDose1) { pickTime(1, true, schedule.weekendDose1) }
-            SettingsRow("Dose 2", schedule.weekendDose2) { pickTime(2, true, schedule.weekendDose2) }
+            SettingsSection("Weekday schedule", Icons.Default.Schedule) {
+                SettingsRow("First dose", schedule.weekdayDose1) { pickTime(1, false, schedule.weekdayDose1) }
+                SectionDivider()
+                SettingsRow("Second dose", schedule.weekdayDose2) { pickTime(2, false, schedule.weekdayDose2) }
+            }
         }
         item {
-            Text("Set times to match your prescription. Schedule changes apply to future alarms, not saved taken timestamps. Force-stopping the app can prevent reminders until you open it again.",
-                color = MutedText, fontSize = 14.sp)
+            SettingsSection("Weekend schedule", Icons.Default.CalendarMonth) {
+                SettingsRow("First dose", schedule.weekendDose1) { pickTime(1, true, schedule.weekendDose1) }
+                SectionDivider()
+                SettingsRow("Second dose", schedule.weekendDose2) { pickTime(2, true, schedule.weekendDose2) }
+            }
+        }
+        item {
+            SettingsSection("About reminders", Icons.Default.Info) {
+                Text("Set times to match your prescription. Schedule changes apply to future alarms, not saved taken timestamps.",
+                    color = MutedText, fontSize = 14.sp, modifier = Modifier.padding(top = 16.dp))
+                Spacer(Modifier.height(12.dp))
+                Text("Force-stopping DoseEra can prevent reminders until you open it again.",
+                    color = MutedText, fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun SettingsRow(title: String, value: String, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 20.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        Text(title, Modifier.weight(1f), color = Navy, fontSize = 17.sp)
-        Text(value, color = Emerald, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+private fun SettingsSection(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = SoftGray)
+    ) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, tint = Emerald, modifier = Modifier.size(23.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(title, color = Navy, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
     }
+}
+
+@Composable
+private fun SectionDivider() {
+    HorizontalDivider(color = Color(0xFFE1E7EE), thickness = 1.dp)
+}
+
+@Composable
+private fun SettingsRow(title: String, value: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick).padding(vertical = 17.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, Modifier.weight(1f), color = Navy, fontSize = 16.sp)
+        Spacer(Modifier.width(12.dp))
+        Text(value, color = Emerald, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+            modifier = Modifier.widthIn(max = 140.dp))
+        Spacer(Modifier.width(4.dp))
+        Icon(Icons.Default.ChevronRight, null, tint = MutedText, modifier = Modifier.size(19.dp))
+    }
+}
+
+@Composable
+private fun StockBar(
+    stock: MedicineStock,
+    todayRecords: List<TakenDose>,
+    today: LocalDate,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(40.dp),
+        colors = CardDefaults.cardColors(containerColor = SoftGreen)
+    ) {
+        if (!stock.isConfigured) {
+            Text("Set up stock tracking", Modifier.padding(22.dp), color = Emerald,
+                fontWeight = FontWeight.SemiBold)
+        } else {
+            val count = stock.remainingPills ?: 0
+            val slotsToday = 2 - todayRecords.map { it.doseNumber }.distinct().size
+            val firstShortDay = if (count < slotsToday) today
+            else today.plusDays(1L + (count - slotsToday) / 2L)
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Medication, null, tint = Emerald)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(count.toString(), color = Navy, fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold)
+                        Text("pills left", color = MutedText, fontSize = 13.sp)
+                    }
+                    Box(Modifier.width(1.dp).height(42.dp).background(Emerald.copy(alpha = 0.2f)))
+                    Spacer(Modifier.width(14.dp))
+                    Icon(Icons.Default.CalendarMonth, null, tint = Emerald)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1.5f)) {
+                        Text(if (count == 0) "Supply status" else "First short day (est.)",
+                            color = MutedText, fontSize = 12.sp)
+                        Text(if (count == 0) "Out of stock" else firstShortDay.format(
+                            DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())),
+                            color = Navy, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    }
+                }
+                if (stock.level != StockLevel.NORMAL) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, null, tint = Emerald, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(when (stock.level) {
+                            StockLevel.EMPTY -> "Out of stock · tap to update"
+                            StockLevel.RED -> "Very low · restock soon"
+                            else -> "Running low · plan a restock"
+                        }, color = Emerald, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StockEditor(
+    stock: MedicineStock,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (Int?, Boolean, Int, Int) -> Unit
+) {
+    var count by remember { mutableStateOf("") }
+    var add by remember { mutableStateOf(false) }
+    var amber by remember { mutableStateOf(stock.amberThreshold.toString()) }
+    var red by remember { mutableStateOf(stock.redThreshold.toString()) }
+    val number = count.toIntOrNull()
+    val a = amber.toIntOrNull()
+    val r = red.toIntOrNull()
+    val countValid = if (count.isBlank()) stock.isConfigured else
+        number != null && number >= (if (add) 1 else 0) &&
+                (!add || (stock.remainingPills ?: 0).toLong() + number.toLong() <= Int.MAX_VALUE)
+    val valid = countValid && a != null && r != null && r >= 1 && a > r
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Pill stock") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Current count: ${stock.remainingPills?.toString() ?: "not set"}. One pill per dose.")
+                if (stock.isConfigured) {
+                    Row {
+                        FilterChip(selected = !add, onClick = { add = false; count = "" },
+                            label = { Text("Set total") }, enabled = !busy)
+                        Spacer(Modifier.width(8.dp))
+                        FilterChip(selected = add, onClick = { add = true; count = "" },
+                            label = { Text("Add resupply") }, enabled = !busy)
+                    }
+                }
+                OutlinedTextField(
+                    value = count, onValueChange = { count = it.filter(Char::isDigit).take(10) },
+                    label = { Text(if (add) "Pills to add" else "Exact total now") },
+                    supportingText = { Text(if (stock.isConfigured) "Leave blank to keep the current count." else "Enter your current total to start tracking.") },
+                    singleLine = true, enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+                OutlinedTextField(value = amber,
+                    onValueChange = { amber = it.filter(Char::isDigit).take(10) },
+                    label = { Text("Amber at or below") }, singleLine = true, enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(value = red,
+                    onValueChange = { red = it.filter(Char::isDigit).take(10) },
+                    label = { Text("Red at or below") }, singleLine = true, enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                Text("Amber must be higher than red. Red must be at least 1. At 0, Home shows Out of stock.", fontSize = 12.sp)
+                Text("The date estimate assumes two one-pill doses each day. A short day is the first date with insufficient pills for all remaining doses. It is not dosing advice.", fontSize = 12.sp)
+            }
+        },
+        confirmButton = { TextButton(enabled = valid && !busy, onClick = {
+            onSave(number, add, a!!, r!!)
+        }) { Text(if (busy) "Saving…" else "Save") } },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } }
+    )
 }
