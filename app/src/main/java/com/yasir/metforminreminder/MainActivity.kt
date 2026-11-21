@@ -1,6 +1,10 @@
 package com.yasir.metforminreminder
 
 import android.Manifest
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import android.app.AlarmManager
 import android.app.TimePickerDialog
 import android.content.Intent
@@ -396,10 +400,40 @@ private fun DoseCard(
     canUndo: Boolean,
     onTake: () -> Unit
 ) {
+    var undoRevealVersion by remember(taken) { mutableStateOf(0) }
+    var showUndo by remember(taken) { mutableStateOf(false) }
+    var cardOrigin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    var takeButtonBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+
+    LaunchedEffect(taken, undoRevealVersion) {
+        showUndo = false
+        val record = taken ?: return@LaunchedEffect
+        val elapsed = record.takenAtEpochMillis?.let { System.currentTimeMillis() - it }
+        val visibleMillis = if (undoRevealVersion > 0) {
+            5_000L
+        } else if (elapsed != null && elapsed in 0L until 5_000L) {
+            5_000L - elapsed
+        } else {
+            return@LaunchedEffect
+        }
+        showUndo = true
+        delay(visibleMillis)
+        showUndo = false
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth()
+            .onGloballyPositioned { cardOrigin = it.boundsInRoot().topLeft }
+            .pointerInput(taken, busy) {
+                detectTapGestures { position ->
+                    if (taken != null && !busy &&
+                        takeButtonBounds?.contains(cardOrigin + position) != true) {
+                        undoRevealVersion++
+                    }
+                }
+            },
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = if (primary) SoftGreen else SoftGray)
+        colors = CardDefaults.cardColors(containerColor = if (taken != null) Color(0xFFEAF9F4) else SoftGray)
     ) {
         Column(Modifier.padding(28.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -418,7 +452,8 @@ private fun DoseCard(
                     Button(
                         onClick = onTake,
                         enabled = taken == null && !busy,
-                        modifier = Modifier.width(108.dp).height(60.dp),
+                        modifier = Modifier.width(108.dp).height(60.dp)
+                            .onGloballyPositioned { takeButtonBounds = it.boundsInRoot() },
                         contentPadding = PaddingValues(0.dp),
                         shape = RoundedCornerShape(40.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -443,7 +478,7 @@ private fun DoseCard(
             Spacer(Modifier.height(18.dp))
             Text(if (taken != null) "Taken at ${taken.time}" else "Scheduled dose",
                 color = if (taken != null) Emerald else MutedText, fontSize = 14.sp)
-            if (taken != null) {
+            if (taken != null && showUndo) {
                 TextButton(onClick = onUndo, enabled = canUndo && !busy) { Text("Undo Taken") }
                 if (!canUndo) Text("Undo the second dose first", color = MutedText, fontSize = 12.sp)
             }
