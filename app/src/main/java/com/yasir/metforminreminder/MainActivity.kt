@@ -350,7 +350,7 @@ private fun HomeScreen(
             Spacer(Modifier.height(18.dp))
         }
         item(key = "stock") {
-            StockBar(stock, todayRecords, today, onStock)
+            StockBar(stock, todayRecords, onStock)
         }
         if (!remindersReady) {
             item {
@@ -700,7 +700,6 @@ private fun SettingsRow(title: String, value: String, onClick: () -> Unit) {
 private fun StockBar(
     stock: MedicineStock,
     todayRecords: List<TakenDose>,
-    today: LocalDate,
     onClick: () -> Unit
 ) {
     Card(
@@ -714,28 +713,31 @@ private fun StockBar(
                 fontWeight = FontWeight.SemiBold)
         } else {
             val count = stock.remainingPills ?: 0
-            val slotsToday = 2 - todayRecords.map { it.doseNumber }.distinct().size
-            val firstShortDay = if (count < slotsToday) today
-            else today.plusDays(1L + (count - slotsToday) / 2L)
+            val onlyDose = todayRecords.distinctBy { it.doseNumber }.singleOrNull()
+            val partialDayPill = if (onlyDose?.stockDeducted == true) 1L else 0L
+            val daysRemaining = (count + partialDayPill) / 2L
             Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Medication, null, tint = Emerald)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
-                        Text(count.toString(), color = Navy, fontSize = 22.sp,
+                        Text(count.toString(), color = Navy, fontSize = 24.sp,
                             fontWeight = FontWeight.Bold)
-                        Text("pills left", color = MutedText, fontSize = 13.sp)
+                        Text("pills left", color = Navy, fontSize = 13.sp)
                     }
                     Box(Modifier.width(1.dp).height(42.dp).background(Emerald.copy(alpha = 0.2f)))
                     Spacer(Modifier.width(14.dp))
                     Icon(Icons.Default.CalendarMonth, null, tint = Emerald)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1.5f)) {
-                        Text(if (count == 0) "Supply status" else "First short day (est.)",
-                            color = MutedText, fontSize = 12.sp)
-                        Text(if (count == 0) "Out of stock" else firstShortDay.format(
-                            DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault())),
-                            color = Navy, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        if (count == 0) {
+                            Text("Supply status", color = MutedText, fontSize = 12.sp)
+                            Text("Out of stock", color = Navy, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        } else {
+                            Text(if (daysRemaining == 1L) "1 day" else "$daysRemaining days",
+                                color = Navy, fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                            Text("Days remaining", color = Navy, fontSize = 13.sp)
+                        }
                     }
                 }
                 if (stock.level != StockLevel.NORMAL) {
@@ -807,7 +809,7 @@ private fun StockEditor(
                     label = { Text("Red at or below") }, singleLine = true, enabled = !busy,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                 Text("Amber must be higher than red. Red must be at least 1. At 0, Home shows Out of stock.", fontSize = 12.sp)
-                Text("The date estimate assumes two one-pill doses each day. A short day is the first date with insufficient pills for all remaining doses. It is not dosing advice.", fontSize = 12.sp)
+                Text("The days estimate assumes two one-pill doses per day. The count of pills updates after each dose; the days estimate counts down after both doses are recorded. It is not dosing advice.", fontSize = 12.sp)
             }
         },
         confirmButton = { TextButton(enabled = valid && !busy, onClick = {
