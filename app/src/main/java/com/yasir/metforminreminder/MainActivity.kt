@@ -48,8 +48,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-private val Navy = Color(0xFF101A2B)
-private val MutedText = Color(0xFF718096)
+private val LocalDarkMode = staticCompositionLocalOf { false }
+private val Navy: Color
+    @Composable get() = if (LocalDarkMode.current) Color(0xFFE8EDF5) else Color(0xFF101A2B)
+private val MutedText: Color
+    @Composable get() = if (LocalDarkMode.current) Color(0xFFA9B5C5) else Color(0xFF718096)
+private val AppBackground: Color
+    @Composable get() = if (LocalDarkMode.current) Color(0xFF11161D) else Color.White
+private val TakenBackground: Color
+    @Composable get() = if (LocalDarkMode.current) Color(0xFF16392F) else Color(0xFFEAF9F4)
 private data class DosePalette(val accent: Color, val soft: Color)
 private val LocalDosePalette = staticCompositionLocalOf {
     DosePalette(Color(0xFF05855F), Color(0xFFEAF9F4))
@@ -58,7 +65,8 @@ private val Emerald: Color
     @Composable get() = LocalDosePalette.current.accent
 private val SoftGreen: Color
     @Composable get() = LocalDosePalette.current.soft
-private val SoftGray = Color(0xFFF4F7FB)
+private val SoftGray: Color
+    @Composable get() = if (LocalDarkMode.current) Color(0xFF1D2632) else Color(0xFFF4F7FB)
 private val TimeFormat = DateTimeFormatter.ofPattern("h:mm a", Locale.US)
 
 class MainActivity : ComponentActivity() {
@@ -85,6 +93,8 @@ private fun MetforminReminderApp(resumeVersion: Int) {
     val schedule by preferences.schedule.collectAsState(initial = null)
     val records by preferences.takenDoses.collectAsState(initial = null)
     val stock by preferences.stock.collectAsState(initial = null)
+    val savedDarkMode by preferences.darkMode.collectAsState(initial = null)
+    val darkMode = savedDarkMode == true
     var selectedTab by remember { mutableStateOf("Home") }
     var showSettings by remember { mutableStateOf(false) }
     var stockDialog by remember { mutableStateOf(false) }
@@ -155,13 +165,41 @@ private fun MetforminReminderApp(resumeVersion: Int) {
         StockLevel.RED, StockLevel.EMPTY -> DosePalette(Color(0xFFBA2727), Color(0xFFFFEAEA))
         else -> DosePalette(Color(0xFF05855F), Color(0xFFEAF9F4))
     }
-    CompositionLocalProvider(LocalDosePalette provides palette) {
-        MaterialTheme(colorScheme = lightColorScheme(primary = Emerald, background = Color.White)) {
+    val activePalette = if (darkMode) when (stock?.level) {
+        StockLevel.AMBER -> DosePalette(Color(0xFFF1C56B), Color(0xFF3B3020))
+        StockLevel.RED, StockLevel.EMPTY -> DosePalette(Color(0xFFFF9999), Color(0xFF3D242A))
+        else -> DosePalette(Color(0xFF65D9AF), Color(0xFF16392F))
+    } else palette
+    val view = androidx.compose.ui.platform.LocalView.current
+    SideEffect {
+        val window = (context as? android.app.Activity)?.window
+        if (window != null && !view.isInEditMode) {
+            val controller = androidx.core.view.WindowCompat.getInsetsController(window, view)
+            controller.isAppearanceLightStatusBars = !darkMode
+            controller.isAppearanceLightNavigationBars = !darkMode
+            @Suppress("DEPRECATION")
+            window.statusBarColor = if (darkMode) 0xFF11161D.toInt() else android.graphics.Color.WHITE
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = if (darkMode) 0xFF11161D.toInt() else android.graphics.Color.WHITE
+        }
+    }
+    CompositionLocalProvider(LocalDosePalette provides activePalette, LocalDarkMode provides darkMode) {
+        val colors = if (darkMode) darkColorScheme(
+            primary = Emerald, onPrimary = Color(0xFF10221B),
+            primaryContainer = SoftGreen, onPrimaryContainer = Navy,
+            secondary = Emerald, onSecondary = Color(0xFF10221B),
+            secondaryContainer = SoftGreen, onSecondaryContainer = Navy,
+            background = AppBackground, onBackground = Navy,
+            surface = SoftGray, onSurface = Navy,
+            surfaceVariant = Color(0xFF293440), onSurfaceVariant = MutedText,
+            outline = Color(0xFF7E8B9B), outlineVariant = Color(0xFF344150)
+        ) else lightColorScheme(primary = Emerald, background = AppBackground)
+        MaterialTheme(colorScheme = colors) {
             Scaffold(
-                containerColor = Color.White,
+                containerColor = AppBackground,
                 snackbarHost = { SnackbarHost(snackbar) },
                 bottomBar = {
-                    if (!showSettings) NavigationBar(containerColor = Color.White) {
+                    if (!showSettings) NavigationBar(containerColor = AppBackground) {
                         listOf("Home", "History", "Stats").forEach { tab ->
                             NavigationBarItem(
                                 selected = selectedTab == tab,
@@ -194,6 +232,11 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                         modifier = Modifier.padding(padding), schedule = cs,
                         notificationsEnabled = notificationsEnabled, exactEnabled = exactEnabled,
                         stock = st,
+                        darkMode = darkMode,
+                        onDarkModeChange = { enabled -> scope.launch {
+                            try { preferences.saveDarkMode(enabled) }
+                            catch (_: Exception) { message("Could not save appearance setting") }
+                        } },
                         restockEnabled = run {
                             resumeVersion
                             permissionRevision
@@ -435,7 +478,7 @@ private fun DoseCard(
                 }
             },
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = if (taken != null) Color(0xFFEAF9F4) else SoftGray)
+        colors = CardDefaults.cardColors(containerColor = if (taken != null) TakenBackground else SoftGray)
     ) {
         Column(Modifier.padding(28.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -468,7 +511,7 @@ private fun DoseCard(
                     }
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(64.dp).clip(CircleShape).background(Color(0xFFE5EBF2)),
+                        Box(Modifier.size(64.dp).clip(CircleShape).background(if (LocalDarkMode.current) Color(0xFF2B3745) else Color(0xFFE5EBF2)),
                             contentAlignment = Alignment.Center) {
                             Icon(Icons.Default.NotificationsNone, null, tint = Navy)
                         }
@@ -518,13 +561,13 @@ private fun HistoryScreen(
                         val planned = record?.scheduledTime ?: schedule.timeFor(date, number).format(TimeFormat)
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                                .background(if (record != null) SoftGreen else Color.White).padding(16.dp),
+                                .background(if (record != null) SoftGreen else AppBackground).padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (record != null) Emerald else Color(0xFFE2E8F0)),
+                                .background(if (record != null) Emerald else (if (LocalDarkMode.current) Color(0xFF344150) else Color(0xFFE2E8F0))),
                                 contentAlignment = Alignment.Center) {
-                                if (record != null) Icon(Icons.Default.Check, "Taken", tint = Color.White)
+                                if (record != null) Icon(Icons.Default.Check, "Taken", tint = MaterialTheme.colorScheme.onPrimary)
                                 else Text(number.toString(), color = MutedText)
                             }
                             Spacer(Modifier.width(14.dp))
@@ -574,6 +617,8 @@ private fun SettingsScreen(
     notificationsEnabled: Boolean,
     exactEnabled: Boolean,
     stock: MedicineStock,
+    darkMode: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
     restockEnabled: Boolean,
     onStock: () -> Unit,
     onRestockNotifications: () -> Unit,
@@ -586,9 +631,12 @@ private fun SettingsScreen(
     androidx.activity.compose.BackHandler(onBack = onBack)
     fun pickTime(number: Int, day: Int, value: String) {
         val time = runCatching { LocalTime.parse(value, TimeFormat) }.getOrDefault(LocalTime.NOON)
-        TimePickerDialog(context, { _, hour, minute ->
-            onSave(number, day, LocalTime.of(hour, minute).format(TimeFormat))
-        }, time.hour, time.minute, false).show()
+        TimePickerDialog(context,
+            if (darkMode) android.R.style.Theme_Material_Dialog_Alert
+            else android.R.style.Theme_Material_Light_Dialog_Alert,
+            { _, hour, minute ->
+                onSave(number, day, LocalTime.of(hour, minute).format(TimeFormat))
+            }, time.hour, time.minute, false).show()
     }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -604,6 +652,20 @@ private fun SettingsScreen(
                 Column {
                     Text("Settings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Navy)
                     Text("Manage your supply and reminders", color = MutedText, fontSize = 14.sp)
+                }
+            }
+        }
+        item {
+            SettingsSection("Appearance", Icons.Default.Settings) {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Dark mode", color = Navy, fontSize = 16.sp)
+                        Text("Use a darker colour palette", color = MutedText, fontSize = 13.sp)
+                    }
+                    Switch(checked = darkMode, onCheckedChange = onDarkModeChange)
                 }
             }
         }
@@ -685,7 +747,7 @@ private fun SettingsSection(
 
 @Composable
 private fun SectionDivider() {
-    HorizontalDivider(color = Color(0xFFE1E7EE), thickness = 1.dp)
+    HorizontalDivider(color = if (LocalDarkMode.current) Color(0xFF344150) else Color(0xFFE1E7EE), thickness = 1.dp)
 }
 
 @Composable

@@ -127,6 +127,7 @@ class MedicinePreferences(context: Context) {
     private val store = context.applicationContext.medicineDataStore
 
     private object Keys {
+        val DARK_MODE = booleanPreferencesKey("dark_mode")
         val WEEKDAY_DOSE_1 = stringPreferencesKey("weekday_dose_1")
         val WEEKDAY_DOSE_2 = stringPreferencesKey("weekday_dose_2")
         val WEEKEND_DOSE_1 = stringPreferencesKey("weekend_dose_1")
@@ -151,6 +152,10 @@ class MedicinePreferences(context: Context) {
             booleanPreferencesKey("stock_empty_alert_sent")
     }
 
+    val darkMode: Flow<Boolean> = store.data.map {
+        it[Keys.DARK_MODE] ?: false
+    }
+
     val schedule: Flow<MedicineSchedule> = store.data.map {
         readSchedule(it)
     }
@@ -161,6 +166,10 @@ class MedicinePreferences(context: Context) {
 
     val stock: Flow<MedicineStock> = store.data.map {
         readStock(it)
+    }
+
+    suspend fun saveDarkMode(enabled: Boolean) {
+        store.edit { it[Keys.DARK_MODE] = enabled }
     }
 
     suspend fun getSchedule(): MedicineSchedule = schedule.first()
