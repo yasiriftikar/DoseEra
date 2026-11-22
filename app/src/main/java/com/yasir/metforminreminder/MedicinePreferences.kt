@@ -30,15 +30,21 @@ data class MedicineSchedule(
     val weekdayDose1: String = "12:00 AM",
     val weekdayDose2: String = "12:00 PM",
     val weekendDose1: String = "12:00 AM",
-    val weekendDose2: String = "12:00 PM"
+    val weekendDose2: String = "12:00 PM",
+    val saturdayDose1: String = weekendDose1,
+    val saturdayDose2: String = weekendDose2,
+    val sundayDose1: String = weekendDose1,
+    val sundayDose2: String = weekendDose2
 ) {
     fun timeFor(date: LocalDate, doseNumber: Int): LocalTime {
         require(doseNumber in 1..2)
 
-        val weekend = date.dayOfWeek.value >= 6
+        val day = date.dayOfWeek.value
         val text = when {
-            weekend && doseNumber == 1 -> weekendDose1
-            weekend -> weekendDose2
+            day == 6 && doseNumber == 1 -> saturdayDose1
+            day == 6 -> saturdayDose2
+            day == 7 && doseNumber == 1 -> sundayDose1
+            day == 7 -> sundayDose2
             doseNumber == 1 -> weekdayDose1
             else -> weekdayDose2
         }
@@ -125,6 +131,10 @@ class MedicinePreferences(context: Context) {
         val WEEKDAY_DOSE_2 = stringPreferencesKey("weekday_dose_2")
         val WEEKEND_DOSE_1 = stringPreferencesKey("weekend_dose_1")
         val WEEKEND_DOSE_2 = stringPreferencesKey("weekend_dose_2")
+        val SATURDAY_DOSE_1 = stringPreferencesKey("saturday_dose_1")
+        val SATURDAY_DOSE_2 = stringPreferencesKey("saturday_dose_2")
+        val SUNDAY_DOSE_1 = stringPreferencesKey("sunday_dose_1")
+        val SUNDAY_DOSE_2 = stringPreferencesKey("sunday_dose_2")
         val TAKEN_DOSES = stringSetPreferencesKey("taken_doses")
 
         val STOCK_COUNT = intPreferencesKey("stock_count")
@@ -171,17 +181,37 @@ class MedicinePreferences(context: Context) {
     suspend fun saveWeekendDose2(value: String) =
         saveTime(Keys.WEEKEND_DOSE_2, value)
 
+    suspend fun saveSaturdayDose1(value: String) =
+        saveTime(Keys.SATURDAY_DOSE_1, value)
+
+    suspend fun saveSaturdayDose2(value: String) =
+        saveTime(Keys.SATURDAY_DOSE_2, value)
+
+    suspend fun saveSundayDose1(value: String) =
+        saveTime(Keys.SUNDAY_DOSE_1, value)
+
+    suspend fun saveSundayDose2(value: String) =
+        saveTime(Keys.SUNDAY_DOSE_2, value)
+
     suspend fun saveSchedule(value: MedicineSchedule) {
         val weekday1 = normalizeTime(value.weekdayDose1)
         val weekday2 = normalizeTime(value.weekdayDose2)
         val weekend1 = normalizeTime(value.weekendDose1)
         val weekend2 = normalizeTime(value.weekendDose2)
+        val saturday1 = normalizeTime(value.saturdayDose1)
+        val saturday2 = normalizeTime(value.saturdayDose2)
+        val sunday1 = normalizeTime(value.sundayDose1)
+        val sunday2 = normalizeTime(value.sundayDose2)
 
         store.edit { prefs ->
             prefs[Keys.WEEKDAY_DOSE_1] = weekday1
             prefs[Keys.WEEKDAY_DOSE_2] = weekday2
             prefs[Keys.WEEKEND_DOSE_1] = weekend1
             prefs[Keys.WEEKEND_DOSE_2] = weekend2
+            prefs[Keys.SATURDAY_DOSE_1] = saturday1
+            prefs[Keys.SATURDAY_DOSE_2] = saturday2
+            prefs[Keys.SUNDAY_DOSE_1] = sunday1
+            prefs[Keys.SUNDAY_DOSE_2] = sunday2
         }
     }
 
@@ -467,7 +497,11 @@ class MedicinePreferences(context: Context) {
             weekdayDose1 = read(Keys.WEEKDAY_DOSE_1, "12:00 AM"),
             weekdayDose2 = read(Keys.WEEKDAY_DOSE_2, "12:00 PM"),
             weekendDose1 = read(Keys.WEEKEND_DOSE_1, "12:00 AM"),
-            weekendDose2 = read(Keys.WEEKEND_DOSE_2, "12:00 PM")
+            weekendDose2 = read(Keys.WEEKEND_DOSE_2, "12:00 PM"),
+            saturdayDose1 = read(Keys.SATURDAY_DOSE_1, read(Keys.WEEKEND_DOSE_1, "12:00 AM")),
+            saturdayDose2 = read(Keys.SATURDAY_DOSE_2, read(Keys.WEEKEND_DOSE_2, "12:00 PM")),
+            sundayDose1 = read(Keys.SUNDAY_DOSE_1, read(Keys.WEEKEND_DOSE_1, "12:00 AM")),
+            sundayDose2 = read(Keys.SUNDAY_DOSE_2, read(Keys.WEEKEND_DOSE_2, "12:00 PM"))
         )
     }
 

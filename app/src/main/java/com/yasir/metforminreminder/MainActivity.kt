@@ -226,11 +226,13 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                                 catch (_: Exception) { message("Open Android settings to allow alarms.") }
                             }
                         },
-                        onSave = { number, weekend, time -> scope.launch {
+                        onSave = { number, day, time -> scope.launch {
                             try {
                                 when {
-                                    weekend && number == 1 -> preferences.saveWeekendDose1(time)
-                                    weekend -> preferences.saveWeekendDose2(time)
+                                    day == 6 && number == 1 -> preferences.saveSaturdayDose1(time)
+                                    day == 6 -> preferences.saveSaturdayDose2(time)
+                                    day == 7 && number == 1 -> preferences.saveSundayDose1(time)
+                                    day == 7 -> preferences.saveSundayDose2(time)
                                     number == 1 -> preferences.saveWeekdayDose1(time)
                                     else -> preferences.saveWeekdayDose2(time)
                                 }
@@ -578,14 +580,14 @@ private fun SettingsScreen(
     onBack: () -> Unit,
     onNotifications: () -> Unit,
     onExactAlarms: () -> Unit,
-    onSave: (Int, Boolean, String) -> Unit
+    onSave: (Int, Int, String) -> Unit
 ) {
     val context = LocalContext.current
     androidx.activity.compose.BackHandler(onBack = onBack)
-    fun pickTime(number: Int, weekend: Boolean, value: String) {
+    fun pickTime(number: Int, day: Int, value: String) {
         val time = runCatching { LocalTime.parse(value, TimeFormat) }.getOrDefault(LocalTime.NOON)
         TimePickerDialog(context, { _, hour, minute ->
-            onSave(number, weekend, LocalTime.of(hour, minute).format(TimeFormat))
+            onSave(number, day, LocalTime.of(hour, minute).format(TimeFormat))
         }, time.hour, time.minute, false).show()
     }
     LazyColumn(
@@ -627,16 +629,23 @@ private fun SettingsScreen(
         }
         item {
             SettingsSection("Weekday schedule", Icons.Default.Schedule) {
-                SettingsRow("First dose", schedule.weekdayDose1) { pickTime(1, false, schedule.weekdayDose1) }
+                SettingsRow("First dose", schedule.weekdayDose1) { pickTime(1, 0, schedule.weekdayDose1) }
                 SectionDivider()
-                SettingsRow("Second dose", schedule.weekdayDose2) { pickTime(2, false, schedule.weekdayDose2) }
+                SettingsRow("Second dose", schedule.weekdayDose2) { pickTime(2, 0, schedule.weekdayDose2) }
             }
         }
         item {
-            SettingsSection("Weekend schedule", Icons.Default.CalendarMonth) {
-                SettingsRow("First dose", schedule.weekendDose1) { pickTime(1, true, schedule.weekendDose1) }
+            SettingsSection("Saturday schedule", Icons.Default.CalendarMonth) {
+                SettingsRow("First dose", schedule.saturdayDose1) { pickTime(1, 6, schedule.saturdayDose1) }
                 SectionDivider()
-                SettingsRow("Second dose", schedule.weekendDose2) { pickTime(2, true, schedule.weekendDose2) }
+                SettingsRow("Second dose", schedule.saturdayDose2) { pickTime(2, 6, schedule.saturdayDose2) }
+            }
+        }
+        item {
+            SettingsSection("Sunday schedule", Icons.Default.CalendarMonth) {
+                SettingsRow("First dose", schedule.sundayDose1) { pickTime(1, 7, schedule.sundayDose1) }
+                SectionDivider()
+                SettingsRow("Second dose", schedule.sundayDose2) { pickTime(2, 7, schedule.sundayDose2) }
             }
         }
         item {
