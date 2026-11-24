@@ -16,6 +16,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 
 // Keep this name unchanged to preserve existing on-device data.
@@ -168,6 +169,8 @@ class MedicinePreferences(context: Context) {
             booleanPreferencesKey("stock_red_alert_sent")
         val STOCK_EMPTY_ALERT_SENT =
             booleanPreferencesKey("stock_empty_alert_sent")
+        val DAILY_BACKUP = booleanPreferencesKey("daily_backup")
+        val BACKUP_FOLDER_URI = stringPreferencesKey("backup_folder_uri")
     }
 
     val darkMode: Flow<Boolean> = store.data.map {
@@ -186,8 +189,94 @@ class MedicinePreferences(context: Context) {
         readStock(it)
     }
 
+    val dailyBackupEnabled: Flow<Boolean> = store.data.map {
+        it[Keys.DAILY_BACKUP] ?: false
+    }
+
     suspend fun saveDarkMode(enabled: Boolean) {
         store.edit { it[Keys.DARK_MODE] = enabled }
+    }
+
+    val backupFolderUri: Flow<String?> = store.data.map {
+        it[Keys.BACKUP_FOLDER_URI]
+    }
+
+    suspend fun getBackupFolderUri(): String? = backupFolderUri.first()
+
+    suspend fun saveBackupFolderUri(uri: String) {
+        require(uri.isNotBlank()) { "Select a backup folder" }
+        store.edit { it[Keys.BACKUP_FOLDER_URI] = uri }
+    }
+
+    suspend fun saveDailyBackupEnabled(enabled: Boolean) {
+        store.edit { it[Keys.DAILY_BACKUP] = enabled }
+    }
+
+    suspend fun isDailyBackupEnabled(): Boolean = dailyBackupEnabled.firstOrNull() ?: false
+
+    suspend fun createBackupJson(): org.json.JSONObject {
+        val schedule = getSchedule()
+        val doses = getTakenDoses()
+        val stock = getStock()
+        val darkMode = darkMode.firstOrNull() ?: false
+        val dailyBackup = dailyBackupEnabled.firstOrNull() ?: false
+
+        val scheduleJson = org.json.JSONObject().apply {
+            put("weekdayDose1", schedule.weekdayDose1)
+            put("weekdayDose2", schedule.weekdayDose2)
+            put("weekendDose1", schedule.weekendDose1)
+            put("weekendDose2", schedule.weekendDose2)
+            put("saturdayDose1", schedule.saturdayDose1)
+            put("saturdayDose2", schedule.saturdayDose2)
+            put("sundayDose1", schedule.sundayDose1)
+            put("sundayDose2", schedule.sundayDose2)
+            put("weekdayDose3", schedule.weekdayDose3 ?: org.json.JSONObject.NULL)
+            put("saturdayDose3", schedule.saturdayDose3 ?: org.json.JSONObject.NULL)
+            put("sundayDose3", schedule.sundayDose3 ?: org.json.JSONObject.NULL)
+
+            val changes = org.json.JSONObject()
+            schedule.thirdDoseChanges.forEach { (date, enabled) ->
+                changes.put(date.toString(), enabled)
+            }
+            put("thirdDoseChanges", changes)
+        }
+
+        val dosesJson = org.json.JSONArray()
+        doses.forEach { dose ->
+            dosesJson.put(
+                org.json.JSONObject().apply {
+                    put("date", dose.date)
+                    put("time", dose.time)
+                    put("doseNumber", dose.doseNumber)
+                    put(
+                        "takenAtEpochMillis",
+                        dose.takenAtEpochMillis ?: org.json.JSONObject.NULL
+                    )
+                    put("scheduledTime", dose.scheduledTime ?: org.json.JSONObject.NULL)
+                    put("stockDeducted", dose.stockDeducted)
+                }
+            )
+        }
+
+        val stockJson = org.json.JSONObject().apply {
+            put("remainingPills", stock.remainingPills ?: org.json.JSONObject.NULL)
+            put("amberThreshold", stock.amberThreshold)
+            put("redThreshold", stock.redThreshold)
+            put("amberAlertSent", stock.amberAlertSent)
+            put("redAlertSent", stock.redAlertSent)
+            put("emptyAlertSent", stock.emptyAlertSent)
+        }
+
+        return org.json.JSONObject().apply {
+            put("app", "DoseEra")
+            put("backupVersion", 1)
+            put("createdAt", System.currentTimeMillis())
+            put("darkMode", darkMode)
+            put("dailyBackupEnabled", dailyBackup)
+            put("schedule", scheduleJson)
+            put("takenDoses", dosesJson)
+            put("stock", stockJson)
+        }
     }
 
     suspend fun getSchedule(): MedicineSchedule = schedule.first()

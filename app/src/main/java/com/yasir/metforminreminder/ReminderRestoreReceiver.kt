@@ -33,7 +33,13 @@ class ReminderRestoreReceiver : BroadcastReceiver() {
             } catch (error: Exception) {
                 Log.e(TAG, "Unable to restore reminders after $action", error)
             } finally {
-                pendingResult.finish()
+                try {
+                    BackupManager.refreshDailyBackup(appContext)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Unable to restore daily backup after $action", error)
+                } finally {
+                    pendingResult.finish()
+                }
             }
         }
     }

@@ -33,6 +33,10 @@
             android:name=".TakenDoseReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".BackupReceiver"
+            android:exported="false" />
+
         <!-- System broadcasts restore alarms using the saved schedule/history.
              Not direct-boot aware: DataStore is accessed after user unlock. -->
         <receiver

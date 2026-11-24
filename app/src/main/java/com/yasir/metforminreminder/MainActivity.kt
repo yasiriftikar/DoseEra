@@ -98,6 +98,8 @@ private fun MetforminReminderApp(resumeVersion: Int) {
     val records by preferences.takenDoses.collectAsState(initial = null)
     val stock by preferences.stock.collectAsState(initial = null)
     val savedDarkMode by preferences.darkMode.collectAsState(initial = null)
+    val dailyBackupEnabled by preferences.dailyBackupEnabled.collectAsState(initial = false)
+    val backupFolderUri by preferences.backupFolderUri.collectAsState(initial = null)
     val darkMode = savedDarkMode == true
     var selectedTab by remember { mutableStateOf("Home") }
     var showSettings by remember { mutableStateOf(false) }
@@ -116,6 +118,79 @@ private fun MetforminReminderApp(resumeVersion: Int) {
     ) { permissionRevision++ }
 
     fun message(text: String) { scope.launch { snackbar.showSnackbar(text) } }
+
+    val backupFolderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                    preferences.saveBackupFolderUri(uri.toString())
+                    BackupManager.refreshDailyBackup(context)
+                    message("Backup folder saved")
+                } catch (_: Exception) {
+                    message("Could not save folder access. Select another folder and try again.")
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(resumeVersion) {
+        try {
+            BackupManager.refreshDailyBackup(context)
+        } catch (_: Exception) {
+            message("Daily backup scheduling needs attention in Settings.")
+        }
+    }
+
+    fun createBackup() {
+        if (busy) return
+        if (backupFolderUri == null) {
+            message("Select a backup folder first, then tap Create backup now.")
+            backupFolderPicker.launch(null)
+            return
+        }
+        busy = true
+
+        scope.launch {
+            try {
+                val file = BackupManager.createBackup(context)
+                message("Backup saved: ${file.name}")
+            } catch (error: Exception) {
+                message("Could not create backup. Check the selected folder, its access and storage space.")
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    fun changeDailyBackup(enabled: Boolean) {
+        if (enabled && backupFolderUri == null) {
+            message("Select a backup folder first, then enable Daily backup.")
+            backupFolderPicker.launch(null)
+            return
+        }
+        scope.launch {
+            try {
+                preferences.saveDailyBackupEnabled(enabled)
+                BackupManager.scheduleDaily(context, enabled)
+                message(
+                    if (enabled) {
+                        "Daily backup enabled. Backups run around 2:05 AM."
+                    } else {
+                        "Daily backup disabled."
+                    }
+                )
+            } catch (error: Exception) {
+                message("Could not save backup setting.")
+            }
+        }
+    }
 
     suspend fun refreshAfterChange() {
         try { AlarmScheduler.refresh(context) }
@@ -238,6 +313,13 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                         notificationsEnabled = notificationsEnabled, exactEnabled = exactEnabled,
                         stock = st,
                         darkMode = darkMode,
+                    dailyBackupEnabled = dailyBackupEnabled,
+                    backupFolderUri = backupFolderUri,
+                    onSelectBackupFolder = {
+                        backupFolderPicker.launch(backupFolderUri?.let { Uri.parse(it) })
+                    },
+                    onCreateBackup = { createBackup() },
+                    onDailyBackupChange = { enabled -> changeDailyBackup(enabled) },
                         onDarkModeChange = { enabled -> scope.launch {
                             try { preferences.saveDarkMode(enabled) }
                             catch (_: Exception) { message("Could not save appearance setting") }
@@ -750,6 +832,11 @@ private fun SettingsScreen(
     stock: MedicineStock,
     darkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
+    dailyBackupEnabled: Boolean,
+    backupFolderUri: String?,
+    onSelectBackupFolder: () -> Unit,
+    onCreateBackup: () -> Unit,
+    onDailyBackupChange: (Boolean) -> Unit,
     restockEnabled: Boolean,
     onStock: () -> Unit,
     onRestockNotifications: () -> Unit,
@@ -873,6 +960,51 @@ private fun SettingsScreen(
                 SettingsRow("First dose", schedule.sundayDose1) { pickTime(1, 7, schedule.sundayDose1) }
                 SectionDivider()
                 SettingsRow("Second dose", schedule.sundayDose2) { pickTime(2, 7, schedule.sundayDose2) }
+            }
+        }
+        item {
+            SettingsSection("Backup", Icons.Default.Backup) {
+                SettingsRow(
+                    "Backup folder",
+                    if (backupFolderUri == null) "Select folder" else "Change folder"
+                ) { onSelectBackupFolder() }
+                if (backupFolderUri != null) {
+                    Text(
+                        Uri.decode(backupFolderUri),
+                        color = MutedText, fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                }
+                SectionDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Daily backup", color = Navy, fontSize = 16.sp)
+                        Text(
+                            if (dailyBackupEnabled) "Enabled; runs around 2:05 AM"
+                            else "Create a local backup once per day",
+                            color = MutedText, fontSize = 13.sp
+                        )
+                    }
+                    Switch(
+                        checked = dailyBackupEnabled,
+                        onCheckedChange = onDailyBackupChange
+                    )
+                }
+
+                SectionDivider()
+
+                SettingsRow("Create backup now", "Save") { onCreateBackup() }
+
+                Text(
+                    "Backups are saved in your selected folder, not app-private storage. The latest 14 automatic backups are kept; manual backups are not automatically deleted. Backup files are unencrypted; choose a trusted location.",
+                    color = MutedText, fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             }
         }
         item {
