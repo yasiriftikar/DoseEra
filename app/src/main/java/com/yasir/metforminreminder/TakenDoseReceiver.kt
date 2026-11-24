@@ -26,10 +26,11 @@ class TakenDoseReceiver : BroadcastReceiver() {
             when (notificationId) {
                 AlarmScheduler.DOSE_1_REQUEST_CODE -> 1
                 AlarmScheduler.DOSE_2_REQUEST_CODE -> 2
+                AlarmScheduler.DOSE_3_REQUEST_CODE -> 3
                 else -> 0
             }
         )
-        if (doseNumber !in 1..2) {
+        if (doseNumber !in 1..3) {
             Log.w(TAG, "Ignoring Taken action without a valid dose identity")
             return
         }

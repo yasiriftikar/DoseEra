@@ -91,9 +91,15 @@ object NotificationHelper {
         }
 
     fun dismissDose(context: Context, doseNumber: Int) {
-        require(doseNumber in 1..2)
+        require(doseNumber in 1..3)
         context.getSystemService(NotificationManager::class.java)
-            .cancel(if (doseNumber == 1) 1001 else 1002)
+            .cancel(
+                when (doseNumber) {
+                    1 -> 1001
+                    2 -> 1002
+                    else -> 1003
+                }
+            )
     }
 
     fun dismissRestock(context: Context) {

@@ -34,13 +34,26 @@ data class MedicineSchedule(
     val saturdayDose1: String = weekendDose1,
     val saturdayDose2: String = weekendDose2,
     val sundayDose1: String = weekendDose1,
-    val sundayDose2: String = weekendDose2
+    val sundayDose2: String = weekendDose2,
+    val weekdayDose3: String? = null,
+    val saturdayDose3: String? = null,
+    val sundayDose3: String? = null,
+    val thirdDoseChanges: Map<LocalDate, Boolean> = emptyMap()
 ) {
+    fun doseCountFor(date: LocalDate): Int =
+        if (thirdDoseChanges.entries.filter { it.key <= date }
+                .maxByOrNull { it.key }?.value == true) 3 else 2
+
     fun timeFor(date: LocalDate, doseNumber: Int): LocalTime {
-        require(doseNumber in 1..2)
+        require(doseNumber in 1..3)
 
         val day = date.dayOfWeek.value
         val text = when {
+            doseNumber == 3 -> requireNotNull(when (day) {
+                6 -> saturdayDose3
+                7 -> sundayDose3
+                else -> weekdayDose3
+            })
             day == 6 && doseNumber == 1 -> saturdayDose1
             day == 6 -> saturdayDose2
             day == 7 && doseNumber == 1 -> sundayDose1
@@ -120,7 +133,8 @@ enum class UndoDoseResult {
     UNDONE,
     NOT_FOUND,
     TODAY_ONLY,
-    UNDO_SECOND_DOSE_FIRST
+    UNDO_SECOND_DOSE_FIRST,
+    UNDO_THIRD_DOSE_FIRST
 }
 
 class MedicinePreferences(context: Context) {
@@ -136,6 +150,10 @@ class MedicinePreferences(context: Context) {
         val SATURDAY_DOSE_2 = stringPreferencesKey("saturday_dose_2")
         val SUNDAY_DOSE_1 = stringPreferencesKey("sunday_dose_1")
         val SUNDAY_DOSE_2 = stringPreferencesKey("sunday_dose_2")
+        val WEEKDAY_DOSE_3 = stringPreferencesKey("weekday_dose_3")
+        val SATURDAY_DOSE_3 = stringPreferencesKey("saturday_dose_3")
+        val SUNDAY_DOSE_3 = stringPreferencesKey("sunday_dose_3")
+        val THIRD_DOSE_CHANGES = stringSetPreferencesKey("third_dose_changes")
         val TAKEN_DOSES = stringSetPreferencesKey("taken_doses")
 
         val STOCK_COUNT = intPreferencesKey("stock_count")
@@ -202,6 +220,36 @@ class MedicinePreferences(context: Context) {
     suspend fun saveSundayDose2(value: String) =
         saveTime(Keys.SUNDAY_DOSE_2, value)
 
+    suspend fun configureThirdDose(
+        enabled: Boolean,
+        weekdayTime: String? = null,
+        saturdayTime: String? = null,
+        sundayTime: String? = null
+    ) {
+        val times = if (enabled) {
+            listOf(weekdayTime, saturdayTime, sundayTime).map {
+                normalizeTime(requireNotNull(it))
+            }
+        } else null
+
+        store.edit { prefs ->
+            val today = LocalDate.now()
+            val schedule = readSchedule(prefs)
+            val changes = schedule.thirdDoseChanges.filterKeys { it <= today }.toMutableMap()
+            if (enabled != (schedule.doseCountFor(today) == 3)) {
+                changes[today.plusDays(1)] = enabled
+            }
+            prefs[Keys.THIRD_DOSE_CHANGES] = changes.map { (date, active) ->
+                "$date|$active"
+            }.toSet()
+            if (times != null) {
+                prefs[Keys.WEEKDAY_DOSE_3] = times[0]
+                prefs[Keys.SATURDAY_DOSE_3] = times[1]
+                prefs[Keys.SUNDAY_DOSE_3] = times[2]
+            }
+        }
+    }
+
     suspend fun saveSchedule(value: MedicineSchedule) {
         val weekday1 = normalizeTime(value.weekdayDose1)
         val weekday2 = normalizeTime(value.weekdayDose2)
@@ -240,8 +288,8 @@ class MedicinePreferences(context: Context) {
         takenAtEpochMillis: Long = System.currentTimeMillis(),
         scheduledTime: String? = null
     ): Boolean {
-        require(doseNumber in 1..2) {
-            "Dose number must be 1 or 2"
+        require(doseNumber in 1..3) {
+            "Dose number must be between 1 and 3"
         }
         require(takenAtEpochMillis >= 0)
 
@@ -256,6 +304,9 @@ class MedicinePreferences(context: Context) {
 
         store.edit { prefs ->
             val current = prefs[Keys.TAKEN_DOSES] ?: emptySet()
+            val schedule = readSchedule(prefs)
+            if (doseNumber > schedule.doseCountFor(scheduledDate) ||
+                (doseNumber == 3 && scheduledDate != LocalDate.now())) return@edit
             val exists = current.any { raw ->
                 val dose = decodeDose(raw)
                 dose?.date == dateKey &&
@@ -263,7 +314,7 @@ class MedicinePreferences(context: Context) {
             }
 
             if (!exists) {
-                val planned = explicitTime ?: readSchedule(prefs)
+                val planned = explicitTime ?: schedule
                     .timeFor(scheduledDate, doseNumber)
                     .format(displayTimeFormatter)
 
@@ -295,7 +346,7 @@ class MedicinePreferences(context: Context) {
         date: LocalDate,
         doseNumber: Int
     ): Boolean {
-        require(doseNumber in 1..2)
+        require(doseNumber in 1..3)
 
         return getTakenDoses().any {
             it.date == date.toString() &&
@@ -305,7 +356,7 @@ class MedicinePreferences(context: Context) {
 
     /**
      * Corrects an accidental Taken tap for today's scheduled doses.
-     * Dose 2 must be undone before Dose 1.
+     * Later doses must be undone first.
      *
      * Restores a pill only if this record actually deducted one.
      * Reminder rescheduling is handled by the caller.
@@ -314,7 +365,7 @@ class MedicinePreferences(context: Context) {
         doseNumber: Int,
         scheduledDate: LocalDate = LocalDate.now()
     ): UndoDoseResult {
-        require(doseNumber in 1..2)
+        require(doseNumber in 1..3)
 
         var result = UndoDoseResult.NOT_FOUND
 
@@ -334,6 +385,14 @@ class MedicinePreferences(context: Context) {
             }
 
             if (matching.isEmpty()) {
+                return@edit
+            }
+
+            if (doseNumber < 3 && current.any { raw ->
+                    val dose = decodeDose(raw)
+                    dose?.date == dateKey && dose.doseNumber == 3
+                }) {
+                result = UndoDoseResult.UNDO_THIRD_DOSE_FIRST
                 return@edit
             }
 
@@ -510,7 +569,17 @@ class MedicinePreferences(context: Context) {
             saturdayDose1 = read(Keys.SATURDAY_DOSE_1, read(Keys.WEEKEND_DOSE_1, "12:00 AM")),
             saturdayDose2 = read(Keys.SATURDAY_DOSE_2, read(Keys.WEEKEND_DOSE_2, "12:00 PM")),
             sundayDose1 = read(Keys.SUNDAY_DOSE_1, read(Keys.WEEKEND_DOSE_1, "12:00 AM")),
-            sundayDose2 = read(Keys.SUNDAY_DOSE_2, read(Keys.WEEKEND_DOSE_2, "12:00 PM"))
+            sundayDose2 = read(Keys.SUNDAY_DOSE_2, read(Keys.WEEKEND_DOSE_2, "12:00 PM")),
+            weekdayDose3 = prefs[Keys.WEEKDAY_DOSE_3],
+            saturdayDose3 = prefs[Keys.SATURDAY_DOSE_3],
+            sundayDose3 = prefs[Keys.SUNDAY_DOSE_3],
+            thirdDoseChanges = (prefs[Keys.THIRD_DOSE_CHANGES] ?: emptySet())
+                .mapNotNull { raw ->
+                    runCatching {
+                        LocalDate.parse(raw.substringBefore('|')) to
+                            raw.substringAfter('|').toBooleanStrict()
+                    }.getOrNull()
+                }.toMap()
         )
     }
 
@@ -558,7 +627,7 @@ class MedicinePreferences(context: Context) {
             val number =
                 if (parts.size == 2) 0 else parts[2].toInt()
 
-            require(number in 0..2)
+            require(number in 0..3)
 
             val epoch = if (parts.size >= 5) {
                 parts[3].toLong().also { require(it >= 0) }

@@ -14,6 +14,7 @@ import java.util.Locale
 object AlarmScheduler {
     const val DOSE_1_REQUEST_CODE = 1001
     const val DOSE_2_REQUEST_CODE = 1002
+    const val DOSE_3_REQUEST_CODE = 1003
 
     const val EXTRA_DOSE_NUMBER = "extra_dose_number"
     const val EXTRA_SCHEDULED_DATE = "extra_scheduled_date"
@@ -34,14 +35,18 @@ object AlarmScheduler {
     )
 
     fun notificationIdFor(doseNumber: Int): Int {
-        require(doseNumber in 1..2) { "Dose number must be 1 or 2" }
-        return if (doseNumber == 1) DOSE_1_REQUEST_CODE else DOSE_2_REQUEST_CODE
+        require(doseNumber in 1..3) { "Dose number must be between 1 and 3" }
+        return when (doseNumber) {
+            1 -> DOSE_1_REQUEST_CODE
+            2 -> DOSE_2_REQUEST_CODE
+            else -> DOSE_3_REQUEST_CODE
+        }
     }
 
     fun canScheduleExactAlarms(context: Context): Boolean {
         val manager = context.getSystemService(AlarmManager::class.java)
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            manager.canScheduleExactAlarms()
+                manager.canScheduleExactAlarms()
     }
 
     /** Compatibility overload for the existing Home screen. */
@@ -57,9 +62,26 @@ object AlarmScheduler {
         if (!canScheduleExactAlarms(context)) return false
         val appContext = context.applicationContext
         val now = ZonedDateTime.now()
-        val candidates = (1..2).map { number ->
-            nextOccurrence(schedule, takenDoses, number, now)
+
+        val candidates = buildList {
+            add(nextOccurrence(schedule, takenDoses, 1, now))
+            add(nextOccurrence(schedule, takenDoses, 2, now))
+
+            // Only schedule the third dose when all three of its times are configured.
+            // This prevents an incomplete Third Dose configuration from preventing the
+            // first two reminders from being scheduled.
+            val thirdDoseConfigured =
+                schedule.weekdayDose3 != null &&
+                        schedule.saturdayDose3 != null &&
+                        schedule.sundayDose3 != null
+
+            if (thirdDoseConfigured) {
+                runCatching {
+                    add(nextOccurrence(schedule, takenDoses, 3, now))
+                }
+            }
         }
+
         return try {
             candidates.forEach { scheduleOccurrence(appContext, it) }
             true
@@ -86,7 +108,7 @@ object AlarmScheduler {
         doseNumber: Int,
         now: ZonedDateTime = ZonedDateTime.now()
     ): UpcomingDose {
-        require(doseNumber in 1..2)
+        require(doseNumber in 1..3)
         val takenDates = takenDoses.asSequence()
             .filter { it.doseNumber == doseNumber }
             .map { it.date }
@@ -113,6 +135,7 @@ object AlarmScheduler {
     fun cancelAll(context: Context) {
         cancelDose(context, 1)
         cancelDose(context, 2)
+        cancelDose(context, 3)
     }
 
     /** Cancels this dose's pending alarm, not its visible notification. */
@@ -136,7 +159,11 @@ object AlarmScheduler {
 
     private fun scheduleOccurrence(context: Context, dose: UpcomingDose) {
         val id = notificationIdFor(dose.doseNumber)
-        val ordinal = if (dose.doseNumber == 1) "first" else "second"
+        val ordinal = when (dose.doseNumber) {
+            1 -> "first"
+            2 -> "second"
+            else -> "third"
+        }
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             putExtra(EXTRA_TITLE, "Metformin reminder")
             putExtra(EXTRA_MESSAGE, "Scheduled $ordinal dose: ${dose.scheduledTime}.")

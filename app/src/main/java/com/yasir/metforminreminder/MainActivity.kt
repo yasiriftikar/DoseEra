@@ -1,6 +1,10 @@
 package com.yasir.metforminreminder
 
 import android.Manifest
+import androidx.compose.foundation.border
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
@@ -132,6 +136,7 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                     UndoDoseResult.NOT_FOUND -> "That record was already removed."
                     UndoDoseResult.TODAY_ONLY -> "Only today's doses can be undone."
                     UndoDoseResult.UNDO_SECOND_DOSE_FIRST -> "Undo the second dose first."
+                    UndoDoseResult.UNDO_THIRD_DOSE_FIRST -> "Undo the third dose first."
                 })
             } catch (_: Exception) {
                 message("Could not undo. Check Home and stock before retrying.")
@@ -281,6 +286,12 @@ private fun MetforminReminderApp(resumeVersion: Int) {
                                 }
                                 message("Schedule saved")
                             } catch (_: Exception) { message("Could not save schedule") }
+                        } },
+                        onThirdDoseChange = { enabled, weekday, saturday, sunday -> scope.launch {
+                            try {
+                                preferences.configureThirdDose(enabled, weekday, saturday, sunday)
+                                message(if (enabled) "Third dose enabled from tomorrow" else "Third dose disabled from tomorrow")
+                            } catch (_: Exception) { message("Could not save third-dose setting") }
                         } }
                     )
                 } else when (selectedTab) {
@@ -371,7 +382,7 @@ private fun HomeScreen(
     onUndo: (Int) -> Unit,
     onTake: (Int) -> Unit
 ) {
-    val todayRecords = records.filter { it.date == today.toString() && it.doseNumber in 1..2 }
+    val todayRecords = records.filter { it.date == today.toString() && it.doseNumber in 1..3 }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 28.dp),
@@ -395,7 +406,7 @@ private fun HomeScreen(
             Spacer(Modifier.height(18.dp))
         }
         item(key = "stock") {
-            StockBar(stock, todayRecords, onStock)
+            StockBar(stock, todayRecords, schedule.doseCountFor(today), onStock)
         }
         if (!remindersReady) {
             item {
@@ -404,12 +415,20 @@ private fun HomeScreen(
                 }
             }
         }
-        for (number in 1..2) {
+        val doseCount = schedule.doseCountFor(today)
+        for (number in 1..doseCount) {
             item(key = "dose-$number") {
                 val taken = todayRecords.firstOrNull { it.doseNumber == number }
-                val available = number == 1 || todayRecords.any { it.doseNumber == 1 }
+                val available = number == 1 ||
+                    (1 until number).all { previous ->
+                        todayRecords.any { record -> record.doseNumber == previous }
+                    }
                 DoseCard(
-                    title = if (number == 1) "First Dose" else "Second Dose",
+                    title = when (number) {
+                        1 -> "First Dose"
+                        2 -> "Second Dose"
+                        else -> "Third Dose"
+                    },
                     time = schedule.timeFor(today, number).format(TimeFormat),
                     primary = number == 1,
                     taken = taken,
@@ -417,13 +436,16 @@ private fun HomeScreen(
                     busy = busy,
                     remindersReady = remindersReady,
                     onUndo = { onUndo(number) },
-                    canUndo = number == 2 || todayRecords.none { it.doseNumber == 2 },
+                    canUndo = number == doseCount ||
+                        (number + 1..doseCount).all { later ->
+                            todayRecords.none { record -> record.doseNumber == later }
+                        },
                     onTake = { onTake(number) }
                 )
             }
         }
         item {
-            Text("Today · ${todayRecords.map { it.doseNumber }.distinct().size}/2 recorded",
+            Text("Today · ${todayRecords.map { it.doseNumber }.distinct().size}/$doseCount recorded",
                 fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Navy)
             Spacer(Modifier.height(12.dp))
             Text("Mark Taken only after taking your prescribed dose. Button availability is not dosing advice.",
@@ -538,34 +560,142 @@ private fun HistoryScreen(
     records: List<TakenDose>,
     today: LocalDate
 ) {
-    val dates = (records.mapNotNull { runCatching { LocalDate.parse(it.date) }.getOrNull() }
-            + (0L..6L).map { today.minusDays(it) }).distinct().sortedDescending()
+    var displayedMonth by remember { mutableStateOf(java.time.YearMonth.from(today)) }
+    var selectedDate by remember { mutableStateOf(today) }
+    val dark = LocalDarkMode.current
+    val partialGreen = if (dark) Color(0xFFB5DDC8) else Color(0xFF8EC7AB)
+    val completeGreen = if (dark) Color(0xFF65D9AF) else Color(0xFF05855F)
+    val historyTakenBackground = if (dark) Color(0xFF16392F) else Color(0xFFEAF9F4)
+    val counts = remember(records) {
+        records.filter { it.doseNumber in 1..3 }
+            .groupBy { it.date }
+            .mapValues { (_, doses) -> doses.map { it.doseNumber }.distinct().size }
+    }
+    val firstDay = displayedMonth.atDay(1)
+    val offset = firstDay.dayOfWeek.value - 1
+    val weeks = (offset + displayedMonth.lengthOfMonth() + 6) / 7
     LazyColumn(
         modifier.fillMaxSize(), contentPadding = PaddingValues(24.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         item {
             Text("History", fontSize = 36.sp, fontWeight = FontWeight.Bold, color = Navy)
-            Text("Your medication record", fontSize = 18.sp, color = MutedText)
-            Spacer(Modifier.height(16.dp))
+            Text("Your dose calendar", fontSize = 18.sp, color = MutedText)
         }
-        items(dates, key = { it.toString() }) { date ->
+        item {
+            Card(shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = SoftGray)) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = {
+                            displayedMonth = displayedMonth.minusMonths(1)
+                            selectedDate = displayedMonth.atDay(minOf(selectedDate.dayOfMonth, displayedMonth.lengthOfMonth()))
+                        }) { Icon(Icons.Default.ChevronLeft, "Previous month", tint = Navy) }
+                        Text(displayedMonth.format(DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())),
+                            modifier = Modifier.weight(1f), color = Navy, fontSize = 19.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        IconButton(onClick = {
+                            displayedMonth = displayedMonth.plusMonths(1)
+                            selectedDate = displayedMonth.atDay(minOf(selectedDate.dayOfMonth, displayedMonth.lengthOfMonth()))
+                        }) { Icon(Icons.Default.ChevronRight, "Next month", tint = Navy) }
+                    }
+                    Row(Modifier.fillMaxWidth()) {
+                        (1..7).forEach { day ->
+                            Text(java.time.DayOfWeek.of(day).getDisplayName(
+                                java.time.format.TextStyle.SHORT, Locale.getDefault()),
+                                modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+                                color = MutedText, fontSize = 11.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                    }
+                    repeat(weeks) { week ->
+                        Row(Modifier.fillMaxWidth()) {
+                            repeat(7) { weekday ->
+                                val number = week * 7 + weekday - offset + 1
+                                if (number !in 1..displayedMonth.lengthOfMonth()) {
+                                    Spacer(Modifier.weight(1f).height(54.dp))
+                                } else {
+                                    val date = displayedMonth.atDay(number)
+                                    val count = counts[date.toString()] ?: 0
+                                    val expected = schedule.doseCountFor(date)
+                                    val selected = date == selectedDate
+                                    val description = date.format(DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy")) +
+                                            when (count) {
+                                                in 1 until expected -> ", $count of $expected doses recorded"
+                                                expected -> ", all $expected doses recorded"
+                                                else -> ", no identified dose records"
+                                            }
+                                    Column(
+                                        modifier = Modifier.weight(1f).height(54.dp)
+                                            .padding(2.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (selected) historyTakenBackground else Color.Transparent)
+                                            .then(if (date == today) Modifier.border(
+                                                1.dp, completeGreen, RoundedCornerShape(12.dp)) else Modifier)
+                                            .clickable { selectedDate = date }
+                                            .semantics(mergeDescendants = true) {
+                                                contentDescription = description
+                                                this.selected = selected
+                                            },
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center
+                                    ) {
+                                        Text(number.toString(), color = Navy, fontSize = 15.sp,
+                                            fontWeight = if (selected || date == today) FontWeight.Bold else FontWeight.Normal)
+                                        Spacer(Modifier.height(5.dp))
+                                        Box(Modifier.size(7.dp).clip(CircleShape).background(when {
+                                            count in 1 until expected -> partialGreen
+                                            count >= expected && expected > 0 -> completeGreen
+                                            else -> Color.Transparent
+                                        }))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth().padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(partialGreen))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Partially recorded", color = MutedText, fontSize = 12.sp)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(completeGreen))
+                            Spacer(Modifier.width(6.dp))
+                            Text("All doses recorded", color = MutedText, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = {
+                            displayedMonth = java.time.YearMonth.from(today)
+                            selectedDate = today
+                        }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(0.dp)) {
+                            Text("Today", color = completeGreen, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            val date = selectedDate
             val dayRecords = records.filter { it.date == date.toString() }
             Card(shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = SoftGray)) {
                 Column(Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(date.format(DateTimeFormatter.ofPattern("EEEE, MMM d, yyyy")),
                         fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Navy)
-                    for (number in 1..2) {
+                    val expected = schedule.doseCountFor(date)
+                    for (number in 1..expected) {
                         val record = dayRecords.firstOrNull { it.doseNumber == number }
                         val planned = record?.scheduledTime ?: schedule.timeFor(date, number).format(TimeFormat)
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                                .background(if (record != null) SoftGreen else AppBackground).padding(16.dp),
+                                .background(if (record != null) historyTakenBackground else AppBackground).padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(Modifier.size(36.dp).clip(CircleShape)
-                                .background(if (record != null) Emerald else (if (LocalDarkMode.current) Color(0xFF344150) else Color(0xFFE2E8F0))),
+                                .background(if (record != null) completeGreen else (if (LocalDarkMode.current) Color(0xFF344150) else Color(0xFFE2E8F0))),
                                 contentAlignment = Alignment.Center) {
                                 if (record != null) Icon(Icons.Default.Check, "Taken", tint = MaterialTheme.colorScheme.onPrimary)
                                 else Text(number.toString(), color = MutedText)
@@ -574,7 +704,7 @@ private fun HistoryScreen(
                             Column {
                                 Text("Dose $number · Scheduled $planned", color = Navy, fontWeight = FontWeight.Medium)
                                 Text(if (record != null) "Taken at ${record.time}" else "No taken record",
-                                    color = if (record != null) Emerald else MutedText)
+                                    color = if (record != null) completeGreen else MutedText)
                             }
                         }
                     }
@@ -585,18 +715,19 @@ private fun HistoryScreen(
             }
         }
         item {
-            Text("Last 7 dates plus dates with saved records. Unrecorded slots are not proof of missed doses. Older entries without a saved schedule use your current settings.",
+            Text("Tap a date to view its records. No dot means no identified doses were recorded, not proof of a missed dose. Older entries without a saved schedule use your current settings.",
                 color = MutedText, fontSize = 13.sp)
         }
     }
 }
+
 
 @Composable
 private fun StatsScreen(modifier: Modifier, records: List<TakenDose>, today: LocalDate) {
     val start = today.minusDays(6)
     val count = records.filter {
         val date = runCatching { LocalDate.parse(it.date) }.getOrNull()
-        date != null && !date.isBefore(start) && !date.isAfter(today) && it.doseNumber in 1..2
+        date != null && !date.isBefore(start) && !date.isAfter(today) && it.doseNumber in 1..3
     }.distinctBy { it.date to it.doseNumber }.size
     Column(modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         Text("Stats", fontSize = 36.sp, fontWeight = FontWeight.Bold, color = Navy)
@@ -625,7 +756,8 @@ private fun SettingsScreen(
     onBack: () -> Unit,
     onNotifications: () -> Unit,
     onExactAlarms: () -> Unit,
-    onSave: (Int, Int, String) -> Unit
+    onSave: (Int, Int, String) -> Unit,
+    onThirdDoseChange: (Boolean, String?, String?, String?) -> Unit
 ) {
     val context = LocalContext.current
     androidx.activity.compose.BackHandler(onBack = onBack)
@@ -687,6 +819,39 @@ private fun SettingsScreen(
                 SettingsRow("Restock notifications", if (restockEnabled) "Enabled" else "Review", onRestockNotifications)
                 SectionDivider()
                 SettingsRow("Exact alarms", if (exactEnabled) "Allowed" else "Allow", onExactAlarms)
+            }
+        }
+        item {
+            val thirdEnabled = schedule.doseCountFor(LocalDate.now()) == 3
+            SettingsSection("Daily doses", Icons.Default.Medication) {
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Third daily dose", color = Navy, fontSize = 16.sp)
+                        Text(if (thirdEnabled) "Enabled from tomorrow" else "Enable from tomorrow", color = MutedText, fontSize = 13.sp)
+                    }
+                    Switch(checked = thirdEnabled, onCheckedChange = { enabled ->
+                        if (!enabled) onThirdDoseChange(false, null, null, null)
+                    })
+                }
+                if (thirdEnabled) {
+                    SectionDivider()
+                    SettingsRow("Weekday third dose", schedule.weekdayDose3 ?: "Set time") {
+                        pickTime(3, 0, schedule.weekdayDose3 ?: "12:00 PM")
+                    }
+                    SectionDivider()
+                    SettingsRow("Saturday third dose", schedule.saturdayDose3 ?: "Set time") {
+                        pickTime(3, 6, schedule.saturdayDose3 ?: "12:00 PM")
+                    }
+                    SectionDivider()
+                    SettingsRow("Sunday third dose", schedule.sundayDose3 ?: "Set time") {
+                        pickTime(3, 7, schedule.sundayDose3 ?: "12:00 PM")
+                    }
+                    Text("All three third-dose times must be set before the dose becomes active. Changes apply from tomorrow.",
+                        color = MutedText, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+                }
             }
         }
         item {
@@ -771,6 +936,7 @@ private fun SettingsRow(title: String, value: String, onClick: () -> Unit) {
 private fun StockBar(
     stock: MedicineStock,
     todayRecords: List<TakenDose>,
+    doseCount: Int,
     onClick: () -> Unit
 ) {
     Card(
@@ -786,7 +952,7 @@ private fun StockBar(
             val count = stock.remainingPills ?: 0
             val onlyDose = todayRecords.distinctBy { it.doseNumber }.singleOrNull()
             val partialDayPill = if (onlyDose?.stockDeducted == true) 1L else 0L
-            val daysRemaining = (count + partialDayPill) / 2L
+            val daysRemaining = (count + partialDayPill) / doseCount.toLong()
             Column(Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Medication, null, tint = Emerald)
@@ -880,7 +1046,7 @@ private fun StockEditor(
                     label = { Text("Red at or below") }, singleLine = true, enabled = !busy,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                 Text("Amber must be higher than red. Red must be at least 1. At 0, Home shows Out of stock.", fontSize = 12.sp)
-                Text("The days estimate assumes two one-pill doses per day. The count of pills updates after each dose; the days estimate counts down after both doses are recorded. It is not dosing advice.", fontSize = 12.sp)
+                Text("The days estimate uses your current daily dose setting. The count of pills updates after each dose; the days estimate counts down after both doses are recorded. It is not dosing advice.", fontSize = 12.sp)
             }
         },
         confirmButton = { TextButton(enabled = valid && !busy, onClick = {

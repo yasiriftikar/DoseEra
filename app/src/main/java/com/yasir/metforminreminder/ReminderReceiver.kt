@@ -30,10 +30,11 @@ class ReminderReceiver : BroadcastReceiver() {
             when (notificationId) {
                 1001 -> 1
                 1002 -> 2
+                1003 -> 3
                 else -> 0
             }
         )
-        if (doseNumber !in 1..2) {
+        if (doseNumber !in 1..3) {
             Log.w(TAG, "Ignoring alarm without a valid dose identity")
             return
         }
